@@ -3,36 +3,43 @@ import {
   Input,
   Output,
   Mp4OutputFormat,
+  WebMOutputFormat,
   BufferTarget,
   BlobSource,
   Conversion,
   ALL_FORMATS,
   QUALITY_HIGH,
   VideoSampleSink,
+  VideoSample,
 } from 'mediabunny';
 import { Mockup } from '../constants/mockups';
 
-export type RenderMode = 'single' | 'comparison';
+export type Background =
+  | { type: 'color'; color: string }
+  | { type: 'gradient'; from: string; to: string; angle: number }
+  | { type: 'image'; file: File };
+
+export type ExportFormat = 'mp4' | 'webm-transparent';
 
 type GenerateVideoParams = {
-  mode: RenderMode;
-  primaryVideoFile: File;
-  comparisonVideoFile?: File | null;
+  videoFiles: File[];
   mockup: Mockup;
-  backgroundColor: string;
+  background: Background;
   canvasWidth: number;
   canvasHeight: number;
   phoneSizePercentage: number;
+  videoSizePercentage: number;
   mockupBackgroundColor: string;
   verticalOffset: number;
-  primaryDuration: number;
-  comparisonDuration?: number | null;
   frameRate: number;
+  exportFormat: ExportFormat;
+  loopShorter: boolean;
+  videoStartTimes: number[];
+  videoEndTimes: number[];
+  deviceGapPercent: number;
 };
 
 interface UseMediabunnyHook {
-  isLoaded: boolean;
-  isLoading: boolean;
   progress: number;
   reset: () => void;
   transpilingStarted: boolean;
@@ -41,9 +48,143 @@ interface UseMediabunnyHook {
   generateVideo: (params: GenerateVideoParams) => Promise<void>;
 }
 
+const createRoundedRectPath = (
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number
+) => {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+};
+
+const computeLayout = (
+  canvasWidth: number,
+  canvasHeight: number,
+  mockup: Mockup,
+  phoneSizePercentage: number,
+  verticalOffset: number,
+  count: number,
+  gapPercent: number,
+) => {
+  const mockupAspect = mockup.width / mockup.height;
+  const gapPx = count > 1 ? Math.round((canvasWidth * gapPercent) / 100) : 0;
+  const totalGapPx = gapPx * Math.max(0, count - 1);
+  const columnWidth = count > 0 ? (canvasWidth - totalGapPx) / count : canvasWidth;
+  const maxHeightFromColumn = (columnWidth * 0.97) / mockupAspect;
+  const maxHeightFromCanvas = canvasHeight * (phoneSizePercentage / 100);
+  const mockupHeight = Math.min(maxHeightFromColumn, maxHeightFromCanvas);
+  const mockupWidth = mockupHeight * mockupAspect;
+  const mockupScale = mockupHeight / mockup.height;
+  const mockupInnerHeight = Math.round(mockup.innerHeight * mockupScale);
+  const mockupInnerWidth = Math.round(mockup.innerWidth * mockupScale);
+  const borderRadius = mockup.cornerRadius * mockupScale;
+  const offsetX = (mockup.innerX ?? (mockup.width - mockup.innerWidth) / 2) * mockupScale;
+  const offsetY = (mockup.innerY ?? (mockup.height - mockup.innerHeight) / 2) * mockupScale;
+  const offsetInPixels = (verticalOffset / 100) * canvasHeight;
+
+  const totalRowWidth = count * mockupWidth + totalGapPx;
+  const rowStartX = (canvasWidth - totalRowWidth) / 2;
+
+  const slots = Array.from({ length: count }, (_, i) => {
+    const posX = rowStartX + i * (mockupWidth + gapPx);
+    const posY = ((canvasHeight - mockupHeight) / 2 + offsetInPixels) * 0.9;
+    return { posX, posY };
+  });
+
+  return {
+    slots,
+    mockupWidth,
+    mockupHeight,
+    mockupInnerWidth,
+    mockupInnerHeight,
+    offsetX,
+    offsetY,
+    borderRadius,
+  };
+};
+
+const paintBackground = (
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  width: number,
+  height: number,
+  background: Background,
+  backgroundImage: ImageBitmap | null,
+) => {
+  if (background.type === 'color') {
+    ctx.fillStyle = background.color;
+    ctx.fillRect(0, 0, width, height);
+    return;
+  }
+  if (background.type === 'gradient') {
+    const rad = (background.angle * Math.PI) / 180;
+    const cx = width / 2;
+    const cy = height / 2;
+    const half = Math.abs(Math.cos(rad)) * width / 2 + Math.abs(Math.sin(rad)) * height / 2;
+    const dx = Math.cos(rad) * half;
+    const dy = Math.sin(rad) * half;
+    const gradient = ctx.createLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy);
+    gradient.addColorStop(0, background.from);
+    gradient.addColorStop(1, background.to);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    return;
+  }
+  if (background.type === 'image' && backgroundImage) {
+    const imgAspect = backgroundImage.width / backgroundImage.height;
+    const canvasAspect = width / height;
+    let sx = 0, sy = 0, sw = backgroundImage.width, sh = backgroundImage.height;
+    if (imgAspect > canvasAspect) {
+      sw = backgroundImage.height * canvasAspect;
+      sx = (backgroundImage.width - sw) / 2;
+    } else {
+      sh = backgroundImage.width / canvasAspect;
+      sy = (backgroundImage.height - sh) / 2;
+    }
+    ctx.drawImage(backgroundImage, sx, sy, sw, sh, 0, 0, width, height);
+    return;
+  }
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, height);
+};
+
+const getCoveredVideoRect = (
+  sourceWidth: number,
+  sourceHeight: number,
+  targetX: number,
+  targetY: number,
+  targetWidth: number,
+  targetHeight: number,
+  videoSizePercentage: number,
+) => {
+  if (sourceWidth <= 0 || sourceHeight <= 0) {
+    return { x: targetX, y: targetY, width: targetWidth, height: targetHeight };
+  }
+
+  const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight) * (videoSizePercentage / 100);
+  const width = sourceWidth * scale;
+  const height = sourceHeight * scale;
+
+  return {
+    x: targetX + (targetWidth - width) / 2,
+    y: targetY + (targetHeight - height) / 2,
+    width,
+    height,
+  };
+};
+
 const useMediabunny = (): UseMediabunnyHook => {
-  const [isLoaded] = useState(true); // Mediabunny doesn't need loading
-  const [isLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [transpilingStarted, setTranspilingStarted] = useState(false);
   const [transpilingFinished, setTranspilingFinished] = useState(false);
@@ -54,270 +195,206 @@ const useMediabunny = (): UseMediabunnyHook => {
     setProgress(0);
     setTranspilingStarted(false);
     setTranspilingFinished(false);
-    setFinishedVideoUrl(null);
+    setFinishedVideoUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     conversionRef.current = null;
   }, []);
 
   const generateVideo = async ({
-    backgroundColor,
+    videoFiles,
     mockup,
+    background,
     mockupBackgroundColor,
-    mode,
     phoneSizePercentage,
+    videoSizePercentage,
     verticalOffset,
-    primaryVideoFile,
-    comparisonVideoFile,
     canvasWidth,
     canvasHeight,
-    primaryDuration,
-    comparisonDuration,
     frameRate,
+    exportFormat,
+    loopShorter,
+    videoStartTimes,
+    videoEndTimes,
+    deviceGapPercent,
   }: GenerateVideoParams): Promise<void> => {
     setTranspilingStarted(true);
     setTranspilingFinished(false);
     setProgress(0);
 
     try {
-      const mockupScale = phoneSizePercentage / 100;
-      const mockupAspectRatio = mockup.width / mockup.height;
-      const offsetInPixels = (verticalOffset / 100) * canvasHeight;
-      const outputDuration =
-        mode === 'comparison'
-          ? Math.max(primaryDuration, comparisonDuration ?? 0)
-          : primaryDuration;
-
-      const createLayout = (position: { x: number; y: number }, mockupHeight: number, mockupWidth: number) => {
-        const mockupInnerHeight = Math.round(
-          (mockup.innerHeight / mockup.height) * mockupHeight
-        );
-        const mockupInnerWidth = Math.round(
-          (mockup.innerWidth / mockup.height) * mockupHeight
-        );
-        const offsetX = (mockupWidth - mockupInnerWidth) / 2;
-        const offsetY = (mockupHeight - mockupInnerHeight) / 2;
-        const borderRadius = mockup.cornerRadius * (mockupHeight / mockup.height);
-
-        return {
-          posX: position.x,
-          posY: position.y,
-          mockupWidth,
-          mockupHeight,
-          mockupInnerWidth,
-          mockupInnerHeight,
-          offsetX,
-          offsetY,
-          borderRadius,
-          coloredSquareWidth: Math.round(mockupInnerWidth * 1.01),
-          coloredSquareHeight: Math.round(mockupInnerHeight * 1.01),
-        };
-      };
-
-      const singleMockupHeight = canvasHeight * mockupScale;
-      const singleMockupWidth = mockupAspectRatio * singleMockupHeight;
-      const singlePosX = (canvasWidth - singleMockupWidth) / 2;
-      const singlePosY = ((canvasHeight - singleMockupHeight) / 2 + offsetInPixels) * 0.9;
-
-      const comparisonGap = canvasWidth * 0.035;
-      const comparisonTargetHeight = canvasHeight * mockupScale;
-      const comparisonMaxHeightFromWidth =
-        (canvasWidth * 0.92 - comparisonGap) / (mockupAspectRatio * 2);
-      const comparisonMockupHeight = Math.min(
-        comparisonTargetHeight,
-        canvasHeight * 0.78,
-        comparisonMaxHeightFromWidth
-      );
-      const comparisonMockupWidth = mockupAspectRatio * comparisonMockupHeight;
-      const comparisonRowWidth = comparisonMockupWidth * 2 + comparisonGap;
-      const comparisonBaseX = (canvasWidth - comparisonRowWidth) / 2;
-      const comparisonBaseY = Math.max(
-        0,
-        Math.min(
-          canvasHeight - comparisonMockupHeight,
-          (canvasHeight - comparisonMockupHeight) / 2 + offsetInPixels
-        )
-      );
-
-      const layouts =
-        mode === 'comparison'
-          ? {
-              left: createLayout(
-                { x: comparisonBaseX, y: comparisonBaseY },
-                comparisonMockupHeight,
-                comparisonMockupWidth
-              ),
-              right: createLayout(
-                { x: comparisonBaseX + comparisonMockupWidth + comparisonGap, y: comparisonBaseY },
-                comparisonMockupHeight,
-                comparisonMockupWidth
-              ),
-            }
-          : {
-              left: createLayout(
-                { x: singlePosX, y: singlePosY },
-                singleMockupHeight,
-                singleMockupWidth
-              ),
-            };
+      const count = videoFiles.length;
+      const layout = computeLayout(canvasWidth, canvasHeight, mockup, phoneSizePercentage, verticalOffset, count, deviceGapPercent);
+      const {
+        slots,
+        mockupWidth,
+        mockupHeight,
+        mockupInnerWidth,
+        mockupInnerHeight,
+        offsetX,
+        offsetY,
+        borderRadius,
+      } = layout;
+      const coloredSquareWidth = Math.round(mockupInnerWidth * 1.01);
+      const coloredSquareHeight = Math.round(mockupInnerHeight * 1.01);
+      const transparentBackground = exportFormat === 'webm-transparent';
 
       const mockupImageResponse = await fetch(mockup.imageRelative);
       const mockupImageBlob = await mockupImageResponse.blob();
       const mockupImage = await createImageBitmap(mockupImageBlob);
 
-      const primarySource = {
-        file: primaryVideoFile,
-        duration: primaryDuration,
-        slot: 'left' as const,
-      };
-      const comparisonSource =
-        mode === 'comparison' && comparisonVideoFile
-          ? {
-              file: comparisonVideoFile,
-              duration: comparisonDuration ?? 0,
-              slot: 'right' as const,
-            }
-          : null;
+      let backgroundImage: ImageBitmap | null = null;
+      if (background.type === 'image') {
+        backgroundImage = await createImageBitmap(background.file);
+      }
 
-      const mainSource =
-        comparisonSource && comparisonSource.duration > primarySource.duration
-          ? comparisonSource
-          : primarySource;
-      const secondarySource =
-        comparisonSource && mainSource.slot === primarySource.slot
-          ? comparisonSource
-          : comparisonSource && mainSource.slot === comparisonSource.slot
-            ? primarySource
-            : null;
-
-      const input = new Input({
-        source: new BlobSource(mainSource.file),
-        formats: ALL_FORMATS,
+      const inputs = videoFiles.map(
+        (file) => new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+      );
+      const durations = await Promise.all(inputs.map((input) => input.computeDuration()));
+      const frameDuration = 1 / frameRate;
+      const requestedEndTimes = durations.map((duration, idx) => {
+        const requestedEnd = videoEndTimes[idx] ?? duration;
+        return Math.min(Math.max(requestedEnd || duration, 0), duration);
       });
-      const secondaryInput = secondarySource
-        ? new Input({
-            source: new BlobSource(secondarySource.file),
-            formats: ALL_FORMATS,
-          })
-        : null;
-      const secondaryTrack = secondaryInput ? await secondaryInput.getPrimaryVideoTrack() : null;
-      const secondarySink = secondaryTrack ? new VideoSampleSink(secondaryTrack) : null;
+      const startTimes = durations.map((duration, idx) => {
+        const requestedStart = videoStartTimes[idx] ?? 0;
+        const maxStart = Math.max(requestedEndTimes[idx] - frameDuration, 0);
+        return Math.min(Math.max(requestedStart, 0), maxStart);
+      });
+      const endTimes = durations.map((duration, idx) => {
+        const minEnd = Math.min(duration, startTimes[idx] + frameDuration);
+        return Math.min(Math.max(requestedEndTimes[idx], minEnd), duration);
+      });
+      const effectiveDurations = durations.map((_, idx) => Math.max(endTimes[idx] - startTimes[idx], 0));
+      const maxDuration = Math.max(...effectiveDurations);
+      if (!Number.isFinite(maxDuration) || maxDuration <= 0) {
+        throw new Error('Unable to generate video because all selected videos have no remaining duration.');
+      }
+      const driverIdx = effectiveDurations.indexOf(maxDuration);
+
+      const sampleSinks: Array<{
+        idx: number;
+        sink: VideoSampleSink;
+        duration: number;
+        startTime: number;
+        endTime: number;
+        effectiveDuration: number;
+        lastSample: VideoSample | null;
+      }> = [];
+
+      for (let i = 0; i < inputs.length; i++) {
+        const track = await inputs[i].getPrimaryVideoTrack();
+        if (!track) continue;
+        sampleSinks.push({
+          idx: i,
+          sink: new VideoSampleSink(track),
+          duration: durations[i],
+          startTime: startTimes[i],
+          endTime: endTimes[i],
+          effectiveDuration: effectiveDurations[i],
+          lastSample: null,
+        });
+      }
 
       const output = new Output({
-        format: new Mp4OutputFormat(),
+        format: transparentBackground ? new WebMOutputFormat() : new Mp4OutputFormat(),
         target: new BufferTarget(),
       });
 
-      const createRoundedRectPath = (
-        ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
-        x: number,
-        y: number,
-        width: number,
-        height: number,
-        radius: number
-      ) => {
-        ctx.beginPath();
-        ctx.moveTo(x + radius, y);
-        ctx.lineTo(x + width - radius, y);
-        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-        ctx.lineTo(x + width, y + height - radius);
-        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-        ctx.lineTo(x + radius, y + height);
-        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-        ctx.lineTo(x, y + radius);
-        ctx.quadraticCurveTo(x, y, x + radius, y);
-        ctx.closePath();
-      };
-
       const canvas = new OffscreenCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d', {
-        alpha: false,
-        willReadFrequently: false
+        alpha: transparentBackground,
+        willReadFrequently: false,
       })!;
 
+      const drawBackdrop = (slot: { posX: number; posY: number }) => {
+        const squareX = Math.round((slot.posX + offsetX) * 0.995);
+        const squareY = Math.round((slot.posY + offsetY) * 0.995);
+        ctx.save();
+        createRoundedRectPath(ctx, squareX, squareY, coloredSquareWidth, coloredSquareHeight, borderRadius);
+        ctx.fillStyle = mockupBackgroundColor;
+        ctx.fill();
+        ctx.restore();
+      };
+
+      const drawMockupOverlay = (slot: { posX: number; posY: number }) => {
+        ctx.drawImage(mockupImage, slot.posX, slot.posY, mockupWidth, mockupHeight);
+      };
+
+      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample) => {
+        const videoX = Math.round((slot.posX + offsetX) * 0.9995);
+        const videoY = Math.round((slot.posY + offsetY) * 0.9995);
+        ctx.save();
+        createRoundedRectPath(ctx, videoX, videoY, mockupInnerWidth, mockupInnerHeight, borderRadius);
+        ctx.clip();
+        const videoRect = getCoveredVideoRect(
+          sample.displayWidth,
+          sample.displayHeight,
+          videoX,
+          videoY,
+          mockupInnerWidth,
+          mockupInnerHeight,
+          videoSizePercentage,
+        );
+        sample.draw(ctx, videoRect.x, videoRect.y, videoRect.width, videoRect.height);
+        ctx.restore();
+      };
+
       const conversion = await Conversion.init({
-        input,
+        input: inputs[driverIdx],
         output,
         video: {
           width: canvasWidth,
           height: canvasHeight,
           fit: 'fill',
           frameRate,
-          codec: 'avc',
+          codec: transparentBackground ? 'vp9' : 'avc',
           bitrate: QUALITY_HIGH,
-          process: async (sample) => {
+          alpha: transparentBackground ? 'keep' : 'discard',
+          process: async (driverSample) => {
             ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-
-            ctx.fillStyle = backgroundColor;
-            ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-            const secondarySample =
-              secondarySink ? await secondarySink.getSample(sample.timestamp) : null;
-            const slotSamples = {
-              [mainSource.slot]: sample,
-              ...(secondarySource ? { [secondarySource.slot]: secondarySample } : {}),
-            };
-
-            for (const [slot, layout] of Object.entries(layouts)) {
-              const currentSample = slotSamples[slot as keyof typeof slotSamples];
-              const squareX = Math.round((layout.posX + layout.offsetX) * 0.995);
-              const squareY = Math.round((layout.posY + layout.offsetY) * 0.995);
-              const videoX = Math.round((layout.posX + layout.offsetX) * 0.9995);
-              const videoY = Math.round((layout.posY + layout.offsetY) * 0.9995);
-
-              ctx.save();
-              createRoundedRectPath(
-                ctx,
-                squareX,
-                squareY,
-                layout.coloredSquareWidth,
-                layout.coloredSquareHeight,
-                layout.borderRadius
-              );
-              ctx.fillStyle = mockupBackgroundColor;
-              ctx.fill();
-              ctx.restore();
-
-              if (currentSample) {
-                ctx.save();
-                createRoundedRectPath(
-                  ctx,
-                  videoX,
-                  videoY,
-                  layout.mockupInnerWidth,
-                  layout.mockupInnerHeight,
-                  layout.borderRadius
-                );
-                ctx.clip();
-                currentSample.draw(
-                  ctx,
-                  videoX,
-                  videoY,
-                  layout.mockupInnerWidth,
-                  layout.mockupInnerHeight
-                );
-                ctx.restore();
-              }
-
-              ctx.drawImage(
-                mockupImage,
-                layout.posX,
-                layout.posY,
-                layout.mockupWidth,
-                layout.mockupHeight
-              );
+            if (!transparentBackground) {
+              paintBackground(ctx, canvasWidth, canvasHeight, background, backgroundImage);
             }
 
-            secondarySample?.close();
+            const t = driverSample.timestamp;
+            const samplesByIdx = new Map<number, VideoSample>();
+
+            for (const entry of sampleSinks) {
+              let sampleTime: number;
+              if (entry.idx !== driverIdx && loopShorter && entry.effectiveDuration > 0) {
+                sampleTime = entry.startTime + (t % entry.effectiveDuration);
+              } else {
+                const frozenRelativeTime = Math.min(t, Math.max(entry.effectiveDuration - frameDuration, 0));
+                sampleTime = entry.startTime + frozenRelativeTime;
+              }
+              sampleTime = Math.min(sampleTime, Math.max(entry.endTime - frameDuration, entry.startTime));
+              const sample = await entry.sink.getSample(sampleTime);
+              if (sample) {
+                if (entry.lastSample && entry.lastSample !== sample) {
+                  entry.lastSample.close();
+                }
+                entry.lastSample = sample;
+                samplesByIdx.set(entry.idx, sample);
+              } else if (entry.lastSample) {
+                samplesByIdx.set(entry.idx, entry.lastSample);
+              }
+            }
+
+            for (let i = 0; i < count; i++) {
+              drawBackdrop(slots[i]);
+              const sample = samplesByIdx.get(i);
+              if (sample) drawVideoFrame(slots[i], sample);
+              drawMockupOverlay(slots[i]);
+            }
 
             return canvas;
           },
         },
-        audio: {
-          discard: true,
-        },
-        trim: {
-          start: 0,
-          end: outputDuration,
-        },
+        audio: { discard: true },
+        trim: { start: startTimes[driverIdx], end: endTimes[driverIdx] },
       });
 
       conversionRef.current = conversion;
@@ -328,11 +405,20 @@ const useMediabunny = (): UseMediabunnyHook => {
 
       await conversion.execute();
 
+      for (const entry of sampleSinks) {
+        entry.lastSample?.close();
+      }
+
       const outputBuffer = output.target.buffer;
       if (outputBuffer) {
-        const videoBlob = new Blob([outputBuffer], { type: 'video/mp4' });
+        const videoBlob = new Blob([outputBuffer], {
+          type: transparentBackground ? 'video/webm' : 'video/mp4',
+        });
         const videoUrl = URL.createObjectURL(videoBlob);
-        setFinishedVideoUrl(videoUrl);
+        setFinishedVideoUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return videoUrl;
+        });
       }
     } catch (error) {
       console.error('Error generating video:', error);
@@ -344,8 +430,6 @@ const useMediabunny = (): UseMediabunnyHook => {
   };
 
   return {
-    isLoaded,
-    isLoading,
     progress,
     transpilingStarted,
     transpilingFinished,

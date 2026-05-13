@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Next.js 14 client-side video mockup generator that allows users to create professional device mockup videos. The app runs entirely in the browser using Mediabunny for video processing - no server-side processing or uploads occur.
+This is a Vite + React client-side video mockup generator that allows users to create professional device mockup videos. The app runs entirely in the browser using Mediabunny for video processing - no server-side processing or uploads occur.
 
 ## Development Commands
 
 Uses Bun as the package manager:
 
 ```bash
-bun dev           # Start development server on http://localhost:3000
-bun run build     # Build production bundle
-bun run start     # Start production server
-bun run lint      # Run Next.js linting
+bun dev           # Start Vite dev server (default http://localhost:5173)
+bun run build     # Typecheck and build production bundle to dist/
+bun run preview   # Serve the production build locally
+bun run lint      # Run ESLint
 ```
 
 ## Architecture
@@ -48,11 +48,11 @@ The app uses Mediabunny to process videos entirely in the browser:
 **Client-Side Only Architecture**:
 - All processing happens in browser via Mediabunny's WebCodecs-based pipeline
 - No server uploads or external API calls for video processing
-- NoSSRWrapper component ([components/noSSRWrapper.tsx](components/noSSRWrapper.tsx)) ensures Mediabunny only loads client-side
+- Entry: [src/main.tsx](src/main.tsx) mounts [src/App.tsx](src/App.tsx); Mediabunny runs only in the browser bundle
 - Mediabunny handles hardware-accelerated encoding/decoding automatically
 
 **State Management**:
-- Single-file React component architecture in [app/page.tsx](app/page.tsx)
+- Single-file React component architecture in [src/App.tsx](src/App.tsx)
 - useMediabunny hook manages conversion lifecycle and video generation state
 - Progress tracking through Mediabunny's `onProgress` callback
 
@@ -80,9 +80,11 @@ lib/
     mockups.ts                # Device mockup definitions (dimensions, corner radius)
     sizes.ts                  # Output aspect ratios (16:9, 4:3)
     colors.ts                 # Background color palette
-app/page.tsx                  # Main UI and application logic
+src/
+  main.tsx                    # React root and Vercel Analytics
+  App.tsx                     # Main UI and application logic
+  index.css                   # Tailwind entry + global styles
 components/
-  noSSRWrapper.tsx            # Disables SSR for client-only components
   ui/                         # Radix UI components (slider, select, popover)
 ```
 
