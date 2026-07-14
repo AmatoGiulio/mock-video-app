@@ -192,6 +192,20 @@ const getCoveredVideoRect = (
   };
 };
 
+const alignRectToDevicePixels = (rect: { x: number; y: number; width: number; height: number }) => {
+  const left = Math.round(rect.x);
+  const top = Math.round(rect.y);
+  const right = Math.round(rect.x + rect.width);
+  const bottom = Math.round(rect.y + rect.height);
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(right - left, 1),
+    height: Math.max(bottom - top, 1),
+  };
+};
+
 const useMediabunny = (): UseMediabunnyHook => {
   const [progress, setProgress] = useState(0);
   const [transpilingStarted, setTranspilingStarted] = useState(false);
@@ -489,6 +503,8 @@ const useMediabunny = (): UseMediabunnyHook => {
 
       const canvas = new OffscreenCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d')!;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
       paintBackground(ctx, canvasWidth, canvasHeight, background, backgroundImage);
 
       for (let i = 0; i < count; i++) {
@@ -515,14 +531,16 @@ const useMediabunny = (): UseMediabunnyHook => {
         createRoundedRectPath(ctx, screenX, screenY, mockupInnerWidth, mockupInnerHeight, borderRadius);
         ctx.clip();
         const source = imageBitmaps[i];
-        const imageRect = getCoveredVideoRect(
-          source.width,
-          source.height,
-          screenX,
-          screenY,
-          mockupInnerWidth,
-          mockupInnerHeight,
-          videoSizePercentage,
+        const imageRect = alignRectToDevicePixels(
+          getCoveredVideoRect(
+            source.width,
+            source.height,
+            screenX,
+            screenY,
+            mockupInnerWidth,
+            mockupInnerHeight,
+            videoSizePercentage,
+          ),
         );
         ctx.drawImage(source, imageRect.x, imageRect.y, imageRect.width, imageRect.height);
         ctx.restore();
