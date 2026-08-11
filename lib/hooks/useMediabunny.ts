@@ -23,7 +23,7 @@ export type ExportFormat = 'mp4' | 'webm-transparent';
 
 type GenerateVideoParams = {
   videoFiles: File[];
-  mockup: Mockup;
+  mockups: Mockup[];
   background: Background;
   canvasWidth: number;
   canvasHeight: number;
@@ -78,50 +78,78 @@ const createRoundedRectPath = (
   ctx.closePath();
 };
 
+export type LayoutSlot = {
+  mockup: Mockup;
+  posX: number;
+  posY: number;
+  mockupWidth: number;
+  mockupHeight: number;
+  mockupInnerWidth: number;
+  mockupInnerHeight: number;
+  offsetX: number;
+  offsetY: number;
+  borderRadius: number;
+};
+
 const computeLayout = (
   canvasWidth: number,
   canvasHeight: number,
-  mockup: Mockup,
+  mockups: Mockup[],
   phoneSizePercentage: number,
   verticalOffset: number,
-  count: number,
   gapPercent: number,
-) => {
-  const mockupAspect = mockup.width / mockup.height;
+): { slots: LayoutSlot[] } => {
+  const count = mockups.length;
   const gapPx = count > 1 ? Math.round((canvasWidth * gapPercent) / 100) : 0;
   const totalGapPx = gapPx * Math.max(0, count - 1);
   const columnWidth = count > 0 ? (canvasWidth - totalGapPx) / count : canvasWidth;
-  const maxHeightFromColumn = (columnWidth * 0.97) / mockupAspect;
+  // Every device shares the same height, so the widest frame decides how tall the row can get.
+  const widestAspect = Math.max(...mockups.map((mockup) => mockup.width / mockup.height));
+  const maxHeightFromColumn = (columnWidth * 0.97) / widestAspect;
   const maxHeightFromCanvas = canvasHeight * (phoneSizePercentage / 100);
   const mockupHeight = Math.min(maxHeightFromColumn, maxHeightFromCanvas);
-  const mockupWidth = mockupHeight * mockupAspect;
-  const mockupScale = mockupHeight / mockup.height;
-  const mockupInnerHeight = Math.round(mockup.innerHeight * mockupScale);
-  const mockupInnerWidth = Math.round(mockup.innerWidth * mockupScale);
-  const borderRadius = mockup.cornerRadius * mockupScale;
-  const offsetX = (mockup.innerX ?? (mockup.width - mockup.innerWidth) / 2) * mockupScale;
-  const offsetY = (mockup.innerY ?? (mockup.height - mockup.innerHeight) / 2) * mockupScale;
   const offsetInPixels = (verticalOffset / 100) * canvasHeight;
+  const posY = ((canvasHeight - mockupHeight) / 2 + offsetInPixels) * 0.9;
 
-  const totalRowWidth = count * mockupWidth + totalGapPx;
-  const rowStartX = (canvasWidth - totalRowWidth) / 2;
-
-  const slots = Array.from({ length: count }, (_, i) => {
-    const posX = rowStartX + i * (mockupWidth + gapPx);
-    const posY = ((canvasHeight - mockupHeight) / 2 + offsetInPixels) * 0.9;
-    return { posX, posY };
+  const sizes = mockups.map((mockup) => {
+    const mockupScale = mockupHeight / mockup.height;
+    return {
+      mockup,
+      mockupWidth: mockupHeight * (mockup.width / mockup.height),
+      mockupHeight,
+      mockupInnerWidth: Math.round(mockup.innerWidth * mockupScale),
+      mockupInnerHeight: Math.round(mockup.innerHeight * mockupScale),
+      offsetX: (mockup.innerX ?? (mockup.width - mockup.innerWidth) / 2) * mockupScale,
+      offsetY: (mockup.innerY ?? (mockup.height - mockup.innerHeight) / 2) * mockupScale,
+      borderRadius: mockup.cornerRadius * mockupScale,
+    };
   });
 
-  return {
-    slots,
-    mockupWidth,
-    mockupHeight,
-    mockupInnerWidth,
-    mockupInnerHeight,
-    offsetX,
-    offsetY,
-    borderRadius,
-  };
+  const totalRowWidth = sizes.reduce((sum, size) => sum + size.mockupWidth, 0) + totalGapPx;
+  let cursorX = (canvasWidth - totalRowWidth) / 2;
+  const slots = sizes.map((size) => {
+    const slot: LayoutSlot = { ...size, posX: cursorX, posY };
+    cursorX += size.mockupWidth + gapPx;
+    return slot;
+  });
+
+  return { slots };
+};
+
+const loadMockupImages = async (mockups: Mockup[]): Promise<ImageBitmap[]> => {
+  const cache = new Map<string, Promise<ImageBitmap>>();
+  return Promise.all(
+    mockups.map((mockup) => {
+      let pending = cache.get(mockup.imageRelative);
+      if (!pending) {
+        pending = fetch(mockup.imageRelative)
+          .then((response) => response.blob())
+          .then((blob) => createImageBitmap(blob));
+        cache.set(mockup.imageRelative, pending);
+      }
+      return pending;
+    }),
+  );
 };
 
 const paintBackground = (
@@ -227,7 +255,7 @@ const useMediabunny = (): UseMediabunnyHook => {
 
   const generateVideo = async ({
     videoFiles,
-    mockup,
+    mockups,
     background,
     mockupBackgroundColor,
     phoneSizePercentage,
@@ -249,24 +277,18 @@ const useMediabunny = (): UseMediabunnyHook => {
 
     try {
       const count = videoFiles.length;
-      const layout = computeLayout(canvasWidth, canvasHeight, mockup, phoneSizePercentage, verticalOffset, count, deviceGapPercent);
-      const {
-        slots,
-        mockupWidth,
-        mockupHeight,
-        mockupInnerWidth,
-        mockupInnerHeight,
-        offsetX,
-        offsetY,
-        borderRadius,
-      } = layout;
-      const coloredSquareWidth = Math.round(mockupInnerWidth * 1.01);
-      const coloredSquareHeight = Math.round(mockupInnerHeight * 1.01);
+      const slotMockups = videoFiles.map((_, idx) => mockups[idx] ?? mockups[0]);
+      const { slots } = computeLayout(
+        canvasWidth,
+        canvasHeight,
+        slotMockups,
+        phoneSizePercentage,
+        verticalOffset,
+        deviceGapPercent,
+      );
       const transparentBackground = exportFormat === 'webm-transparent';
 
-      const mockupImageResponse = await fetch(mockup.imageRelative);
-      const mockupImageBlob = await mockupImageResponse.blob();
-      const mockupImage = await createImageBitmap(mockupImageBlob);
+      const mockupImages = await loadMockupImages(slotMockups);
 
       let backgroundImage: ImageBitmap | null = null;
       if (background.type === 'image') {
@@ -333,33 +355,40 @@ const useMediabunny = (): UseMediabunnyHook => {
         willReadFrequently: false,
       })!;
 
-      const drawBackdrop = (slot: { posX: number; posY: number }) => {
-        const squareX = Math.round((slot.posX + offsetX) * 0.995);
-        const squareY = Math.round((slot.posY + offsetY) * 0.995);
+      const drawBackdrop = (slot: LayoutSlot) => {
+        const squareX = Math.round((slot.posX + slot.offsetX) * 0.995);
+        const squareY = Math.round((slot.posY + slot.offsetY) * 0.995);
         ctx.save();
-        createRoundedRectPath(ctx, squareX, squareY, coloredSquareWidth, coloredSquareHeight, borderRadius);
+        createRoundedRectPath(
+          ctx,
+          squareX,
+          squareY,
+          Math.round(slot.mockupInnerWidth * 1.01),
+          Math.round(slot.mockupInnerHeight * 1.01),
+          slot.borderRadius,
+        );
         ctx.fillStyle = mockupBackgroundColor;
         ctx.fill();
         ctx.restore();
       };
 
-      const drawMockupOverlay = (slot: { posX: number; posY: number }) => {
-        ctx.drawImage(mockupImage, slot.posX, slot.posY, mockupWidth, mockupHeight);
+      const drawMockupOverlay = (slot: LayoutSlot, mockupImage: ImageBitmap) => {
+        ctx.drawImage(mockupImage, slot.posX, slot.posY, slot.mockupWidth, slot.mockupHeight);
       };
 
-      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample) => {
-        const videoX = Math.round((slot.posX + offsetX) * 0.9995);
-        const videoY = Math.round((slot.posY + offsetY) * 0.9995);
+      const drawVideoFrame = (slot: LayoutSlot, sample: VideoSample) => {
+        const videoX = Math.round((slot.posX + slot.offsetX) * 0.9995);
+        const videoY = Math.round((slot.posY + slot.offsetY) * 0.9995);
         ctx.save();
-        createRoundedRectPath(ctx, videoX, videoY, mockupInnerWidth, mockupInnerHeight, borderRadius);
+        createRoundedRectPath(ctx, videoX, videoY, slot.mockupInnerWidth, slot.mockupInnerHeight, slot.borderRadius);
         ctx.clip();
         const videoRect = getCoveredVideoRect(
           sample.displayWidth,
           sample.displayHeight,
           videoX,
           videoY,
-          mockupInnerWidth,
-          mockupInnerHeight,
+          slot.mockupInnerWidth,
+          slot.mockupInnerHeight,
           videoSizePercentage,
         );
         sample.draw(ctx, videoRect.x, videoRect.y, videoRect.width, videoRect.height);
@@ -412,7 +441,7 @@ const useMediabunny = (): UseMediabunnyHook => {
               drawBackdrop(slots[i]);
               const sample = samplesByIdx.get(i);
               if (sample) drawVideoFrame(slots[i], sample);
-              drawMockupOverlay(slots[i]);
+              drawMockupOverlay(slots[i], mockupImages[i]);
             }
 
             return canvas;
@@ -456,7 +485,7 @@ const useMediabunny = (): UseMediabunnyHook => {
 
   const generateImage = async ({
     imageFiles,
-    mockup,
+    mockups,
     background,
     mockupBackgroundColor,
     phoneSizePercentage,
@@ -472,30 +501,18 @@ const useMediabunny = (): UseMediabunnyHook => {
 
     try {
       const count = imageFiles.length;
-      const layout = computeLayout(
+      const slotMockups = imageFiles.map((_, idx) => mockups[idx] ?? mockups[0]);
+      const { slots } = computeLayout(
         canvasWidth,
         canvasHeight,
-        mockup,
+        slotMockups,
         phoneSizePercentage,
         verticalOffset,
-        count,
         deviceGapPercent,
       );
-      const {
-        slots,
-        mockupWidth,
-        mockupHeight,
-        mockupInnerWidth,
-        mockupInnerHeight,
-        offsetX,
-        offsetY,
-        borderRadius,
-      } = layout;
 
-      const [mockupImage, imageBitmaps] = await Promise.all([
-        fetch(mockup.imageRelative)
-          .then((response) => response.blob())
-          .then((blob) => createImageBitmap(blob)),
+      const [mockupImages, imageBitmaps] = await Promise.all([
+        loadMockupImages(slotMockups),
         Promise.all(imageFiles.map((file) => createImageBitmap(file))),
       ]);
 
@@ -512,26 +529,26 @@ const useMediabunny = (): UseMediabunnyHook => {
 
       for (let i = 0; i < count; i++) {
         const slot = slots[i];
-        const screenX = Math.round((slot.posX + offsetX) * 0.9995);
-        const screenY = Math.round((slot.posY + offsetY) * 0.9995);
-        const backdropX = Math.round((slot.posX + offsetX) * 0.995);
-        const backdropY = Math.round((slot.posY + offsetY) * 0.995);
+        const screenX = Math.round((slot.posX + slot.offsetX) * 0.9995);
+        const screenY = Math.round((slot.posY + slot.offsetY) * 0.9995);
+        const backdropX = Math.round((slot.posX + slot.offsetX) * 0.995);
+        const backdropY = Math.round((slot.posY + slot.offsetY) * 0.995);
 
         ctx.save();
         createRoundedRectPath(
           ctx,
           backdropX,
           backdropY,
-          Math.round(mockupInnerWidth * 1.01),
-          Math.round(mockupInnerHeight * 1.01),
-          borderRadius,
+          Math.round(slot.mockupInnerWidth * 1.01),
+          Math.round(slot.mockupInnerHeight * 1.01),
+          slot.borderRadius,
         );
         ctx.fillStyle = mockupBackgroundColor;
         ctx.fill();
         ctx.restore();
 
         ctx.save();
-        createRoundedRectPath(ctx, screenX, screenY, mockupInnerWidth, mockupInnerHeight, borderRadius);
+        createRoundedRectPath(ctx, screenX, screenY, slot.mockupInnerWidth, slot.mockupInnerHeight, slot.borderRadius);
         ctx.clip();
         const source = imageBitmaps[i];
         const imageRect = alignRectToDevicePixels(
@@ -540,15 +557,15 @@ const useMediabunny = (): UseMediabunnyHook => {
             source.height,
             screenX,
             screenY,
-            mockupInnerWidth,
-            mockupInnerHeight,
+            slot.mockupInnerWidth,
+            slot.mockupInnerHeight,
             videoSizePercentage,
           ),
         );
         ctx.drawImage(source, imageRect.x, imageRect.y, imageRect.width, imageRect.height);
         ctx.restore();
 
-        ctx.drawImage(mockupImage, slot.posX, slot.posY, mockupWidth, mockupHeight);
+        ctx.drawImage(mockupImages[i], slot.posX, slot.posY, slot.mockupWidth, slot.mockupHeight);
       }
 
       setProgress(100);
@@ -559,7 +576,7 @@ const useMediabunny = (): UseMediabunnyHook => {
         return imageUrl;
       });
 
-      mockupImage.close();
+      new Set(mockupImages).forEach((bitmap) => bitmap.close());
       imageBitmaps.forEach((bitmap) => bitmap.close());
       backgroundImage?.close();
     } catch (error) {

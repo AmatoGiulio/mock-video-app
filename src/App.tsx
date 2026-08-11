@@ -15,7 +15,7 @@ import {
 } from "@/lib/colorFormat";
 import { colors } from "@/lib/constants/colors";
 import { gradientPresets } from "@/lib/constants/gradientPresets";
-import { mockupsDefs } from "@/lib/constants/mockups";
+import { mockupsDefs, type Mockup } from "@/lib/constants/mockups";
 import { aspectRatios } from "@/lib/constants/sizes";
 import useMediabunny, { type Background, type ExportFormat } from "@/lib/hooks/useMediabunny";
 import { buildPreviewSurfaceStyle } from "@/lib/previewSurfaceStyle";
@@ -42,7 +42,7 @@ type ExportPreset = "standard" | "x";
 export default function App() {
   const { generateVideo, generateImage, progress, reset, transpilingFinished, finishedVideoUrl, transpilingStarted } = useMediabunny();
   const [mediaMode, setMediaMode] = useState<MediaMode>("video");
-  const [selectedMockup, setSelectedMockup] = useState(defaultMockup);
+  const [selectedMockups, setSelectedMockups] = useState<Mockup[]>([defaultMockup]);
   const [scale, setScale] = useState(90);
   const [videoScale, setVideoScale] = useState(100);
   const [verticalOffset, setVerticalOffset] = useState(0);
@@ -122,6 +122,11 @@ export default function App() {
     setVideoDimensions((prev) => resize(prev, null));
     setVideoStartOffsets((prev) => resize(prev, 0));
     setVideoEndOffsets((prev) => resize(prev, 0));
+    setSelectedMockups((prev) => {
+      const next = prev.slice(0, deviceCount);
+      while (next.length < deviceCount) next.push(prev[prev.length - 1] ?? defaultMockup);
+      return next;
+    });
     videoRefs.current = videoRefs.current.slice(0, deviceCount);
   }, [deviceCount]);
 
@@ -449,6 +454,25 @@ export default function App() {
     [deviceCount, deviceGapPercent],
   );
 
+  const mockupsForDevices = useMemo(
+    () => Array.from({ length: deviceCount }, (_, idx) => selectedMockups[idx] ?? selectedMockups[0] ?? defaultMockup),
+    [deviceCount, selectedMockups],
+  );
+
+  // All frames share the same height, so the widest one decides how large the row can be.
+  const widestMockupAspect = useMemo(
+    () => Math.max(...mockupsForDevices.map((mockup) => mockup.width / mockup.height)),
+    [mockupsForDevices],
+  );
+
+  const setMockupAt = useCallback((idx: number, mockup: Mockup) => {
+    setSelectedMockups((prev) => {
+      const next = prev.slice();
+      next[idx] = mockup;
+      return next;
+    });
+  }, []);
+
   const allVideosLoaded = videoFiles.every((f) => f !== null);
   const anyVideoLoaded = videoFiles.some((f) => f !== null);
 
@@ -459,7 +483,7 @@ export default function App() {
     if (mediaMode === "image") {
       generateImage({
         imageFiles: filledFiles,
-        mockup: selectedMockup,
+        mockups: mockupsForDevices,
         background,
         canvasWidth: selectedAspectRatio.width,
         canvasHeight: selectedAspectRatio.height,
@@ -473,7 +497,7 @@ export default function App() {
     }
     generateVideo({
       videoFiles: filledFiles,
-      mockup: selectedMockup,
+      mockups: mockupsForDevices,
       background,
       canvasWidth: outputDimensions.width,
       canvasHeight: outputDimensions.height,
@@ -507,7 +531,7 @@ export default function App() {
     setVideoStartOffsets(Array(deviceCount).fill(0));
     setVideoEndOffsets(Array(deviceCount).fill(0));
     setDeviceGapPercent(defaultDeviceGapPercent);
-    setSelectedMockup(defaultMockup);
+    setSelectedMockups(Array(deviceCount).fill(defaultMockup));
     setSelectedAspectRatio(defaultAspectRatio);
     setExportFormat("mp4");
     setExportPreset("standard");
@@ -576,9 +600,9 @@ export default function App() {
               const file = videoFiles[idx];
               const url = videoUrls[idx];
               const isDragOver = activeDragIdx === idx;
+              const mockup = mockupsForDevices[idx];
               const cellAspect = (selectedAspectRatio.width / selectedAspectRatio.height) * cellWidthFraction;
-              const mockupAspect = selectedMockup.width / selectedMockup.height;
-              const screenAspect = selectedMockup.innerWidth / selectedMockup.innerHeight;
+              const screenAspect = mockup.innerWidth / mockup.innerHeight;
               const dimensions = videoDimensions[idx];
               const videoAspect = dimensions && dimensions.width > 0 && dimensions.height > 0
                 ? dimensions.width / dimensions.height
@@ -586,7 +610,7 @@ export default function App() {
               const mediaSizing = videoAspect > screenAspect
                 ? { height: `${videoScale}%`, width: "auto" }
                 : { width: `${videoScale}%`, height: "auto" };
-              const maxScaleByColumn = (cellAspect * 0.97 / mockupAspect) * 100;
+              const maxScaleByColumn = (cellAspect * 0.97 / widestMockupAspect) * 100;
               const sizingScale = Math.min(scale, maxScaleByColumn);
               return (
                 <div
@@ -595,7 +619,7 @@ export default function App() {
                   style={{
                     height: `${sizingScale}%`,
                     marginTop: `${verticalOffset}%`,
-                    aspectRatio: `${selectedMockup.width}/${selectedMockup.height}`,
+                    aspectRatio: `${mockup.width}/${mockup.height}`,
                   }}
                 >
                     <div className="h-full w-full flex items-center justify-center cursor-pointer">
@@ -639,10 +663,10 @@ export default function App() {
                           !file && "group-hover/phone:opacity-30 group-hover/phone:blur-sm",
                         )}
                         style={{
-                          left: `${(getMockupPreviewInnerX(selectedMockup) / selectedMockup.width) * 100}%`,
-                          top: `${(getMockupPreviewInnerY(selectedMockup) / selectedMockup.height) * 100}%`,
-                          width: `${(selectedMockup.innerWidth / selectedMockup.width) * 100 * 1.005}%`,
-                          height: `${(selectedMockup.innerHeight / selectedMockup.height) * 100 * 1.01}%`,
+                          left: `${(getMockupPreviewInnerX(mockup) / mockup.width) * 100}%`,
+                          top: `${(getMockupPreviewInnerY(mockup) / mockup.height) * 100}%`,
+                          width: `${(mockup.innerWidth / mockup.width) * 100 * 1.005}%`,
+                          height: `${(mockup.innerHeight / mockup.height) * 100 * 1.01}%`,
                         }}
                       >
                         {file && url && mediaMode === "video" && (
@@ -724,10 +748,10 @@ export default function App() {
                       </div>
 
                       <img
-                        src={selectedMockup.imageRelative}
-                        alt={selectedMockup.name + " mockup"}
-                        width={selectedMockup.width}
-                        height={selectedMockup.height}
+                        src={mockup.imageRelative}
+                        alt={mockup.name + " mockup"}
+                        width={mockup.width}
+                        height={mockup.height}
                         className="h-full w-full relative object-contain pointer-events-none"
                         draggable={false}
                       />
@@ -794,7 +818,14 @@ export default function App() {
                     </div>
                   </div>
                 </PopoverTrigger>
-                <PopoverContent className="px-3 py-2 rounded-lg backdrop-blur-3xl shadow-2xl shadow-black/10 bg-black/5 mt-3 ring-1 ring-black/5 PopoverContent flex flex-col w-[min(16.8rem,calc(60vw-1.2rem))] overflow-hidden">
+                <PopoverContent
+                  align="end"
+                  side="bottom"
+                  sideOffset={12}
+                  collisionPadding={12}
+                  avoidCollisions
+                  className="px-3 py-2 rounded-lg backdrop-blur-3xl shadow-2xl shadow-black/10 bg-white/80 ring-1 ring-black/5 PopoverContent flex flex-col [&>*]:shrink-0 w-[min(16.8rem,calc(60vw-1.2rem))] max-h-[var(--radix-popover-content-available-height,80vh)] overflow-y-auto overscroll-contain"
+                >
                   <label className="font-normal mb-0.5 text-black/80 text-xs">Devices</label>
                   <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
                     <div className="relative flex items-center">
@@ -862,31 +893,53 @@ export default function App() {
                   )}
 
                   <hr className="my-1.5 border-none" />
-                  <label className="font-normal mb-0.5 text-black/80 text-xs">Device</label>
-                  <div className="flex relative items-center w-full">
-                    <select
-                      tabIndex={-1}
-                      className="appearance-none bg-white/60 rounded-md px-3 py-1 w-full text-xs font-normal text-black/80 cursor-pointer"
-                      value={selectedMockup.name}
-                      onChange={(event) => {
-                        setSelectedMockup(mockupsDefs.find((mockup) => mockup.name === event.target.value)!);
-                      }}
-                    >
-                      {mockupGroups.map((group) => (
-                        <optgroup key={group} label={group}>
-                          {mockupsDefs
-                            .filter((mockup) => mockup.group === group)
-                            .map((mockup) => (
-                              <option key={mockup.name} value={mockup.name}>
-                                {mockup.name}
-                              </option>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <label className="font-normal text-black/80 text-xs">
+                      {deviceCount > 1 ? "Frames" : "Device"}
+                    </label>
+                    {deviceCount > 1 && (
+                      <button
+                        className="text-[10px] font-medium text-black/50 hover:text-black/80 cursor-pointer"
+                        onClick={() => setSelectedMockups(Array(deviceCount).fill(mockupsForDevices[0]))}
+                      >
+                        Apply to all
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    {mockupsForDevices.map((mockup, idx) => (
+                      <div key={idx} className="flex items-center gap-1.5">
+                        {deviceCount > 1 && (
+                          <span className="w-3 shrink-0 text-left font-mono text-[10px] text-black/45">{idx + 1}</span>
+                        )}
+                        <div className="flex relative items-center min-w-0 flex-1">
+                          <select
+                            tabIndex={-1}
+                            className="appearance-none bg-white/60 rounded-md px-3 py-1 w-full text-xs font-normal text-black/80 cursor-pointer"
+                            value={mockup.name}
+                            aria-label={deviceCount > 1 ? `Frame for device ${idx + 1}` : "Device"}
+                            onChange={(event) => {
+                              setMockupAt(idx, mockupsDefs.find((entry) => entry.name === event.target.value)!);
+                            }}
+                          >
+                            {mockupGroups.map((group) => (
+                              <optgroup key={group} label={group}>
+                                {mockupsDefs
+                                  .filter((entry) => entry.group === group)
+                                  .map((entry) => (
+                                    <option key={entry.name} value={entry.name}>
+                                      {entry.name}
+                                    </option>
+                                  ))}
+                              </optgroup>
                             ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                    <div className="absolute right-1 text-black/70 pointer-events-none">
-                      <ChevronDown />
-                    </div>
+                          </select>
+                          <div className="absolute right-1 text-black/70 pointer-events-none">
+                            <ChevronDown />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
 
                   <hr className="my-1.5 border-none" />
