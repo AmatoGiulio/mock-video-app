@@ -37,6 +37,7 @@ import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useSta
 type DeviceCount = 1 | 2 | 3;
 type BgTab = "color" | "gradient" | "image";
 type MediaMode = "video" | "image";
+type ExportPreset = "standard" | "x";
 
 export default function App() {
   const { generateVideo, generateImage, progress, reset, transpilingFinished, finishedVideoUrl, transpilingStarted } = useMediabunny();
@@ -47,6 +48,7 @@ export default function App() {
   const [verticalOffset, setVerticalOffset] = useState(0);
   const [selectedFramerate, setSelectedFramerate] = useState(30);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
+  const [exportPreset, setExportPreset] = useState<ExportPreset>("standard");
   const [selectedAspectRatio, setSelectedAspectRatio] = useState(defaultAspectRatio);
   const [deviceCount, setDeviceCount] = useState<DeviceCount>(1);
   const [deviceGapPercent, setDeviceGapPercent] = useState(defaultDeviceGapPercent);
@@ -89,6 +91,13 @@ export default function App() {
     [background, isTransparentExport, selectedAspectRatio.height, selectedAspectRatio.width, solidColor],
   );
   const frameDuration = 1 / selectedFramerate;
+  const outputDimensions = useMemo(
+    () => ({
+      width: exportPreset === "x" ? selectedAspectRatio.xWidth : selectedAspectRatio.width,
+      height: exportPreset === "x" ? selectedAspectRatio.xHeight : selectedAspectRatio.height,
+    }),
+    [exportPreset, selectedAspectRatio],
+  );
 
   const trimmedDurations = useMemo(() => {
     return videoFiles.map((file, idx) => {
@@ -466,13 +475,14 @@ export default function App() {
       videoFiles: filledFiles,
       mockup: selectedMockup,
       background,
-      canvasWidth: selectedAspectRatio.width,
-      canvasHeight: selectedAspectRatio.height,
+      canvasWidth: outputDimensions.width,
+      canvasHeight: outputDimensions.height,
       phoneSizePercentage: scale,
       videoSizePercentage: videoScale,
       mockupBackgroundColor: "black",
       verticalOffset,
-      frameRate: selectedFramerate,
+      frameRate: exportPreset === "x" ? 30 : selectedFramerate,
+      videoBitrate: exportPreset === "x" ? 8_000_000 : undefined,
       exportFormat,
       loopShorter,
       videoStartTimes: videoStartOffsets.slice(0, deviceCount),
@@ -500,6 +510,7 @@ export default function App() {
     setSelectedMockup(defaultMockup);
     setSelectedAspectRatio(defaultAspectRatio);
     setExportFormat("mp4");
+    setExportPreset("standard");
     reset();
   };
 
@@ -959,7 +970,17 @@ export default function App() {
                             )}
                           />
                           <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => setSelectedFramerate(30)}>30</button>
-                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => setSelectedFramerate(60)}>60</button>
+                          <button
+                            className={cn(
+                              "relative m-px flex flex-1 items-center justify-center p-px py-0.5 text-xs font-semibold",
+                              exportPreset === "x" ? "cursor-not-allowed text-black/25" : "cursor-pointer",
+                            )}
+                            onClick={() => setSelectedFramerate(60)}
+                            disabled={exportPreset === "x"}
+                            title={exportPreset === "x" ? "The X preset uses 30fps for a clean 60→30 conversion" : undefined}
+                          >
+                            60
+                          </button>
                         </div>
                       </div>
 
@@ -975,9 +996,55 @@ export default function App() {
                             )}
                           />
                           <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => setExportFormat("mp4")}>MP4</button>
-                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => setExportFormat("webm-transparent")}>WebM</button>
+                          <button
+                            className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5"
+                            onClick={() => {
+                              setExportFormat("webm-transparent");
+                              setExportPreset("standard");
+                            }}
+                          >
+                            WebM
+                          </button>
                         </div>
                       </div>
+
+                      {exportFormat === "mp4" && (
+                        <>
+                          <hr className="my-1.5 border-none" />
+                          <label className="font-normal mb-1 text-black/80 text-xs">Export preset</label>
+                          <div className="bg-stone-900/5 rounded-xl text-black/70 p-0.5">
+                            <div className="relative flex items-center">
+                              <div
+                                className={cn(
+                                  "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-transform ease-in-out duration-200 rounded-[10px] shadow",
+                                  exportPreset === "standard" && "translate-x-0",
+                                  exportPreset === "x" && "translate-x-full",
+                                )}
+                              />
+                              <button
+                                className="relative flex min-h-10 flex-1 cursor-pointer items-center justify-center rounded-[10px] px-2 text-xs font-semibold transition-transform duration-150 ease-out active:scale-[0.96]"
+                                onClick={() => setExportPreset("standard")}
+                              >
+                                Standard
+                              </button>
+                              <button
+                                className="relative flex min-h-10 flex-1 cursor-pointer items-center justify-center rounded-[10px] px-2 text-xs font-semibold transition-transform duration-150 ease-out active:scale-[0.96]"
+                                onClick={() => {
+                                  setExportPreset("x");
+                                  setSelectedFramerate(30);
+                                }}
+                              >
+                                X · HQ
+                              </button>
+                            </div>
+                          </div>
+                          {exportPreset === "x" && (
+                            <p className="mt-1.5 text-left font-mono text-[10px] leading-4 text-black/45">
+                              {outputDimensions.width}×{outputDimensions.height} · 30fps · H.264 · 8Mbps
+                            </p>
+                          )}
+                        </>
+                      )}
                     </>
                   )}
 
@@ -1143,7 +1210,13 @@ export default function App() {
                   onClick={() => {
                     const a = document.createElement("a");
                     a.href = finishedVideoUrl;
-                    a.download = mediaMode === "image" ? "mockup.png" : isTransparentExport ? "mockup.webm" : "mockup.mp4";
+                    a.download = mediaMode === "image"
+                      ? "mockup.png"
+                      : isTransparentExport
+                        ? "mockup.webm"
+                        : exportPreset === "x"
+                          ? "mockup-x.mp4"
+                          : "mockup.mp4";
                     a.click();
                   }}
                 >
