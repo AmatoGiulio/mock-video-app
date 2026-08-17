@@ -704,7 +704,10 @@ export default function App() {
                     aspectRatio: `${selectedMockup.width}/${selectedMockup.height}`,
                   }}
                 >
-                    <div className="h-full w-full flex items-center justify-center cursor-pointer">
+                    <div
+                      ref={(el) => { zoomWrapperRefs.current[idx] = el; }}
+                      className="h-full w-full flex items-center justify-center cursor-pointer"
+                    >
                       <div className={cn(
                         "absolute w-full h-full bg-white/5 rounded-[20%] flex flex-col items-center justify-center p-[5%] transition-colors transform-gpu",
                         !file && "group-hover/phone:bg-white/30",
@@ -750,10 +753,6 @@ export default function App() {
                           width: `${(selectedMockup.innerWidth / selectedMockup.width) * 100 * 1.005}%`,
                           height: `${(selectedMockup.innerHeight / selectedMockup.height) * 100 * 1.01}%`,
                         }}
-                      >
-                      <div
-                        ref={(el) => { zoomWrapperRefs.current[idx] = el; }}
-                        className="w-full h-full"
                       >
                         {file && url && mediaMode === "video" && (
                           <video
@@ -831,7 +830,6 @@ export default function App() {
                             draggable={false}
                           />
                         )}
-                      </div>
                       </div>
 
                       <img

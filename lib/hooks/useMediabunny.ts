@@ -13,7 +13,7 @@ import {
   VideoSample,
 } from 'mediabunny';
 import { Mockup } from '../constants/mockups';
-import { getActiveZoom, scaleRectAroundPoint, type ZoomKeyframe } from '../zoomEffect';
+import { getActiveZoom, type ZoomKeyframe } from '../zoomEffect';
 
 export type Background =
   | { type: 'color'; color: string }
@@ -348,13 +348,13 @@ const useMediabunny = (): UseMediabunnyHook => {
         ctx.drawImage(mockupImage, slot.posX, slot.posY, mockupWidth, mockupHeight);
       };
 
-      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample, relativeTime: number) => {
+      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample) => {
         const videoX = Math.round((slot.posX + offsetX) * 0.9995);
         const videoY = Math.round((slot.posY + offsetY) * 0.9995);
         ctx.save();
         createRoundedRectPath(ctx, videoX, videoY, mockupInnerWidth, mockupInnerHeight, borderRadius);
         ctx.clip();
-        let videoRect = getCoveredVideoRect(
+        const videoRect = getCoveredVideoRect(
           sample.displayWidth,
           sample.displayHeight,
           videoX,
@@ -363,13 +363,25 @@ const useMediabunny = (): UseMediabunnyHook => {
           mockupInnerHeight,
           videoSizePercentage,
         );
-        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
-        if (zoomScale !== 1) {
-          const pivotX = videoX + (mockupInnerWidth * pointX) / 100;
-          const pivotY = videoY + (mockupInnerHeight * pointY) / 100;
-          videoRect = scaleRectAroundPoint(videoRect, pivotX, pivotY, zoomScale);
-        }
         sample.draw(ctx, videoRect.x, videoRect.y, videoRect.width, videoRect.height);
+        ctx.restore();
+      };
+
+      // Zooms the whole device (backdrop + video + mockup overlay) around a
+      // focus point relative to the device's own bounding box.
+      const drawDeviceSlot = (slot: { posX: number; posY: number }, sample: VideoSample | undefined, relativeTime: number) => {
+        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
+        ctx.save();
+        if (zoomScale !== 1) {
+          const pivotX = slot.posX + (mockupWidth * pointX) / 100;
+          const pivotY = slot.posY + (mockupHeight * pointY) / 100;
+          ctx.translate(pivotX, pivotY);
+          ctx.scale(zoomScale, zoomScale);
+          ctx.translate(-pivotX, -pivotY);
+        }
+        drawBackdrop(slot);
+        if (sample) drawVideoFrame(slot, sample);
+        drawMockupOverlay(slot);
         ctx.restore();
       };
 
@@ -417,10 +429,7 @@ const useMediabunny = (): UseMediabunnyHook => {
             }
 
             for (let i = 0; i < count; i++) {
-              drawBackdrop(slots[i]);
-              const sample = samplesByIdx.get(i);
-              if (sample) drawVideoFrame(slots[i], sample, relativeTimesByIdx.get(i) ?? 0);
-              drawMockupOverlay(slots[i]);
+              drawDeviceSlot(slots[i], samplesByIdx.get(i), relativeTimesByIdx.get(i) ?? 0);
             }
 
             return canvas;

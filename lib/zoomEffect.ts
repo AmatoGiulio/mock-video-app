@@ -74,21 +74,6 @@ export function getActiveZoom(keyframes: ZoomKeyframe[], relativeTime: number): 
   return { scale: 1, pointX: 50, pointY: 50 };
 }
 
-export function scaleRectAroundPoint(
-  rect: { x: number; y: number; width: number; height: number },
-  pivotX: number,
-  pivotY: number,
-  scale: number,
-) {
-  if (scale === 1) return rect;
-  return {
-    x: pivotX + (rect.x - pivotX) * scale,
-    y: pivotY + (rect.y - pivotY) * scale,
-    width: rect.width * scale,
-    height: rect.height * scale,
-  };
-}
-
 // --- Timeline editing helpers -------------------------------------------
 
 export type ZoomDragBounds = { lower: number; upper: number };
