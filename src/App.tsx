@@ -549,6 +549,36 @@ export default function App() {
     seekAllVideosToPreviewTime(nextTime);
   }, [finalPreviewDuration, seekAllVideosToPreviewTime, selectedFramerate]);
 
+  const scrubbingRef = useRef(false);
+
+  const seekFromTrackClientX = useCallback((clientX: number, trackEl: HTMLDivElement) => {
+    const rect = trackEl.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const time = ((clientX - rect.left) / rect.width) * zoomTimelineDuration;
+    handlePreviewScrubChange(time);
+  }, [handlePreviewScrubChange, zoomTimelineDuration]);
+
+  const handleTrackPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    scrubbingRef.current = true;
+    seekFromTrackClientX(event.clientX, event.currentTarget);
+  }, [seekFromTrackClientX]);
+
+  const handleTrackPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (zoomDragRef.current) {
+      handleZoomDragMove(event);
+      return;
+    }
+    if (scrubbingRef.current) {
+      seekFromTrackClientX(event.clientX, event.currentTarget);
+    }
+  }, [handleZoomDragMove, seekFromTrackClientX]);
+
+  const handleTrackPointerUp = useCallback(() => {
+    scrubbingRef.current = false;
+    endZoomDrag();
+  }, [endZoomDrag]);
+
   const handleFileChangeAt = useCallback((idx: number) => (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     const file = files?.[0];
@@ -654,15 +684,18 @@ export default function App() {
     return (
       <div
         ref={(el) => { zoomTrackRefs.current[deviceIdx] = el; }}
-        className="relative h-9 w-full select-none rounded-md bg-stone-900/5"
-        onPointerMove={handleZoomDragMove}
-        onPointerUp={endZoomDrag}
-        onPointerCancel={endZoomDrag}
+        className="relative h-9 w-full cursor-pointer select-none rounded-md bg-stone-900/5"
+        onPointerDown={handleTrackPointerDown}
+        onPointerMove={handleTrackPointerMove}
+        onPointerUp={handleTrackPointerUp}
+        onPointerCancel={handleTrackPointerUp}
       >
         <div
-          className="pointer-events-none absolute top-0 bottom-0 w-px bg-black/30"
+          className="pointer-events-none absolute -top-1 bottom-0 z-10 w-0.5 bg-blue-600"
           style={{ left: `${(Math.min(previewScrubTime, finalPreviewDuration) / zoomTimelineDuration) * 100}%` }}
-        />
+        >
+          <div className="absolute -left-[3px] -top-1 h-1.5 w-2 rounded-[1px] bg-blue-600" />
+        </div>
         {kfs.map((kf) => {
           const leftPct = (kf.start / zoomTimelineDuration) * 100;
           const widthPct = ((kf.end - kf.start) / zoomTimelineDuration) * 100;
@@ -692,6 +725,23 @@ export default function App() {
       </div>
     );
   };
+
+  const renderZoomRuler = () => (
+    <div className="relative h-3 w-full font-mono text-[9px] text-black/40">
+      {[0, 0.25, 0.5, 0.75, 1].map((frac) => (
+        <span
+          key={frac}
+          className={cn(
+            "absolute",
+            frac === 0 ? "left-0" : frac === 1 ? "right-0" : "-translate-x-1/2",
+          )}
+          style={frac > 0 && frac < 1 ? { left: `${frac * 100}%` } : undefined}
+        >
+          {Math.round(frac * zoomTimelineDuration * 100) / 100}s
+        </span>
+      ))}
+    </div>
+  );
 
   const renderZoomPropertiesPanel = () => {
     if (!selectedZoom) return null;
@@ -1465,9 +1515,9 @@ export default function App() {
                 <span>{previewPlaying ? "Pause" : "Play"}</span>
               </button>
             </div>
-            {deviceCount > 1 && finalPreviewDuration > 0 && (
+            {finalPreviewDuration > 0 && (
               <div className="flex items-center gap-2 rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
-                <span className="w-12 shrink-0 text-left font-medium text-black/70">Final</span>
+                <span className="w-12 shrink-0 text-left font-medium text-black/70">Time</span>
                 <Slider
                   max={Math.max(finalPreviewDuration, frameDuration)}
                   step={frameDuration}
@@ -1533,6 +1583,7 @@ export default function App() {
                     </div>
                   </div>
                 )}
+                {renderZoomRuler()}
                 {renderZoomTrack(activeLayerIdx)}
                 {renderZoomPropertiesPanel()}
               </div>
@@ -1548,6 +1599,10 @@ export default function App() {
                     <PlusIcon />
                     <span>Add Zoom</span>
                   </button>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-6 shrink-0" />
+                  {renderZoomRuler()}
                 </div>
                 <div className="flex flex-col gap-1.5">
                   {Array.from({ length: deviceCount }).map((_, deviceIdx) => (
