@@ -33,6 +33,7 @@ type GenerateVideoParams = {
   mockupBackgroundColor: string;
   verticalOffset: number;
   frameRate: number;
+  videoBitrate?: number;
   exportFormat: ExportFormat;
   loopShorter: boolean;
   videoStartTimes: number[];
@@ -237,6 +238,7 @@ const useMediabunny = (): UseMediabunnyHook => {
     canvasWidth,
     canvasHeight,
     frameRate,
+    videoBitrate,
     exportFormat,
     loopShorter,
     videoStartTimes,
@@ -382,7 +384,8 @@ const useMediabunny = (): UseMediabunnyHook => {
           fit: 'fill',
           frameRate,
           codec: transparentBackground ? 'vp9' : 'avc',
-          bitrate: QUALITY_HIGH,
+          bitrate: videoBitrate ?? QUALITY_HIGH,
+          keyFrameInterval: 2,
           alpha: transparentBackground ? 'keep' : 'discard',
           process: async (driverSample) => {
             ctx.clearRect(0, 0, canvasWidth, canvasHeight);
