@@ -13,7 +13,7 @@ import {
   VideoSample,
 } from 'mediabunny';
 import { Mockup } from '../constants/mockups';
-import { getZoomScale, scaleRectAroundPoint, type ZoomEffect } from '../zoomEffect';
+import { getActiveZoom, scaleRectAroundPoint, type ZoomKeyframe } from '../zoomEffect';
 
 export type Background =
   | { type: 'color'; color: string }
@@ -38,12 +38,12 @@ type GenerateVideoParams = {
   videoStartTimes: number[];
   videoEndTimes: number[];
   deviceGapPercent: number;
-  zoomEffect: ZoomEffect;
+  zoomKeyframes: ZoomKeyframe[];
 };
 
 type GenerateImageParams = Omit<
   GenerateVideoParams,
-  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomEffect'
+  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomKeyframes'
 > & {
   imageFiles: File[];
 };
@@ -242,7 +242,7 @@ const useMediabunny = (): UseMediabunnyHook => {
     videoStartTimes,
     videoEndTimes,
     deviceGapPercent,
-    zoomEffect,
+    zoomKeyframes,
   }: GenerateVideoParams): Promise<void> => {
     setTranspilingStarted(true);
     setTranspilingFinished(false);
@@ -363,10 +363,10 @@ const useMediabunny = (): UseMediabunnyHook => {
           mockupInnerHeight,
           videoSizePercentage,
         );
-        const zoomScale = getZoomScale(zoomEffect, relativeTime);
+        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
         if (zoomScale !== 1) {
-          const pivotX = videoX + (mockupInnerWidth * zoomEffect.pointX) / 100;
-          const pivotY = videoY + (mockupInnerHeight * zoomEffect.pointY) / 100;
+          const pivotX = videoX + (mockupInnerWidth * pointX) / 100;
+          const pivotY = videoY + (mockupInnerHeight * pointY) / 100;
           videoRect = scaleRectAroundPoint(videoRect, pivotX, pivotY, zoomScale);
         }
         sample.draw(ctx, videoRect.x, videoRect.y, videoRect.width, videoRect.height);

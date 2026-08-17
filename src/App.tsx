@@ -31,7 +31,17 @@ import {
   snapToFrame,
   type VideoDimensions,
 } from "@/lib/videoTrim";
-import { defaultZoomEffect, getZoomScale, type ZoomEffect } from "@/lib/zoomEffect";
+import {
+  clampZoomMove,
+  clampZoomResizeEnd,
+  clampZoomResizeStart,
+  computeZoomDragBounds,
+  createZoomKeyframe,
+  DEFAULT_ZOOM_DURATION,
+  findFreeZoomSlot,
+  getActiveZoom,
+  type ZoomKeyframe,
+} from "@/lib/zoomEffect";
 import { Popover, PopoverTrigger, PopoverContent } from "@radix-ui/react-popover";
 import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -55,7 +65,8 @@ export default function App() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCompleted, setPreviewCompleted] = useState(false);
   const [previewScrubTime, setPreviewScrubTime] = useState(0);
-  const [zoomEffect, setZoomEffect] = useState<ZoomEffect>(defaultZoomEffect);
+  const [zoomKeyframes, setZoomKeyframes] = useState<ZoomKeyframe[]>([]);
+  const [selectedZoomId, setSelectedZoomId] = useState<string | null>(null);
 
   const [videoFiles, setVideoFiles] = useState<(File | null)[]>([null]);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
@@ -65,6 +76,15 @@ export default function App() {
   const [videoEndOffsets, setVideoEndOffsets] = useState<number[]>([0]);
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([]);
   const zoomWrapperRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const zoomTrackRef = useRef<HTMLDivElement | null>(null);
+  const zoomDragRef = useRef<{
+    id: string;
+    mode: "move" | "resize-start" | "resize-end";
+    startClientX: number;
+    originStart: number;
+    originEnd: number;
+    bounds: { lower: number; upper: number };
+  } | null>(null);
   const [activeDragIdx, setActiveDragIdx] = useState<number | null>(null);
 
   const [bgTab, setBgTab] = useState<BgTab>("color");
@@ -298,20 +318,75 @@ export default function App() {
     return Math.min(start + relativeTime, Math.max(end - 0.001, start));
   }, [finalPreviewDuration, loopShorter, videoDurations, videoEndOffsets, videoStartOffsets]);
 
-  const updateZoom = useCallback((patch: Partial<ZoomEffect>) => {
-    setZoomEffect((z) => ({ ...z, ...patch }));
+  const zoomTimelineDuration = Math.max(finalPreviewDuration, 1);
+  const selectedZoom = zoomKeyframes.find((k) => k.id === selectedZoomId) ?? null;
+
+  const updateSelectedZoom = useCallback((patch: Partial<ZoomKeyframe>) => {
+    if (!selectedZoomId) return;
+    setZoomKeyframes((prev) => prev.map((k) => (k.id === selectedZoomId ? { ...k, ...patch } : k)));
+  }, [selectedZoomId]);
+
+  const handleAddZoom = useCallback(() => {
+    const slot = findFreeZoomSlot(zoomKeyframes, zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime);
+    if (!slot) return;
+    const kf = createZoomKeyframe(slot);
+    setZoomKeyframes((prev) => [...prev, kf]);
+    setSelectedZoomId(kf.id);
+  }, [previewScrubTime, zoomKeyframes, zoomTimelineDuration]);
+
+  const handleDeleteZoom = useCallback((id: string) => {
+    setZoomKeyframes((prev) => prev.filter((k) => k.id !== id));
+    setSelectedZoomId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const beginZoomDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>, id: string, mode: "move" | "resize-start" | "resize-end") => {
+    const kf = zoomKeyframes.find((k) => k.id === id);
+    if (!kf) return;
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedZoomId(id);
+    zoomDragRef.current = {
+      id,
+      mode,
+      startClientX: event.clientX,
+      originStart: kf.start,
+      originEnd: kf.end,
+      bounds: computeZoomDragBounds(zoomKeyframes, id, zoomTimelineDuration),
+    };
+  }, [zoomKeyframes, zoomTimelineDuration]);
+
+  const handleZoomDragMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = zoomDragRef.current;
+    const trackEl = zoomTrackRef.current;
+    if (!drag || !trackEl) return;
+    const rect = trackEl.getBoundingClientRect();
+    if (rect.width === 0) return;
+    const deltaSeconds = ((event.clientX - drag.startClientX) / rect.width) * zoomTimelineDuration;
+
+    const next = drag.mode === "move"
+      ? clampZoomMove(drag.originStart, drag.originEnd, drag.originStart + deltaSeconds, drag.bounds)
+      : drag.mode === "resize-start"
+        ? clampZoomResizeStart(drag.originEnd, drag.originStart + deltaSeconds, drag.bounds)
+        : clampZoomResizeEnd(drag.originStart, drag.originEnd + deltaSeconds, drag.bounds);
+
+    setZoomKeyframes((prev) => prev.map((k) => (k.id === drag.id ? { ...k, ...next } : k)));
+  }, [zoomTimelineDuration]);
+
+  const endZoomDrag = useCallback(() => {
+    zoomDragRef.current = null;
   }, []);
 
   const applyZoomStyle = useCallback((idx: number, relativeTime: number) => {
     const el = zoomWrapperRefs.current[idx];
     if (!el) return;
-    const scale = getZoomScale(zoomEffect, relativeTime);
-    el.style.transformOrigin = `${zoomEffect.pointX}% ${zoomEffect.pointY}%`;
+    const { scale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
+    el.style.transformOrigin = `${pointX}% ${pointY}%`;
     el.style.transform = scale !== 1 ? `scale(${scale})` : "";
-  }, [zoomEffect]);
+  }, [zoomKeyframes]);
 
   useEffect(() => {
-    if (mediaMode !== "video" || !zoomEffect.enabled || !previewPlaying) return;
+    if (mediaMode !== "video" || zoomKeyframes.length === 0 || !previewPlaying) return;
     let raf: number;
     const tick = () => {
       videoRefs.current.forEach((video, idx) => {
@@ -322,7 +397,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [applyZoomStyle, getTrimStartForVideo, mediaMode, previewPlaying, zoomEffect.enabled]);
+  }, [applyZoomStyle, getTrimStartForVideo, mediaMode, previewPlaying, zoomKeyframes.length]);
 
   useEffect(() => {
     if (mediaMode !== "video" || previewPlaying) return;
@@ -517,7 +592,7 @@ export default function App() {
       videoStartTimes: videoStartOffsets.slice(0, deviceCount),
       videoEndTimes: videoEndOffsets.slice(0, deviceCount),
       deviceGapPercent,
-      zoomEffect,
+      zoomKeyframes,
     });
   };
 
@@ -540,7 +615,8 @@ export default function App() {
     setSelectedMockup(defaultMockup);
     setSelectedAspectRatio(defaultAspectRatio);
     setExportFormat("mp4");
-    setZoomEffect(defaultZoomEffect);
+    setZoomKeyframes([]);
+    setSelectedZoomId(null);
     reset();
   };
 
@@ -994,104 +1070,6 @@ export default function App() {
                   {mediaMode === "video" && (
                     <>
                       <hr className="my-1.5 border-none" />
-                      <label className="font-normal mb-1 text-black/80 text-xs flex justify-between items-center">
-                        Zoom Effect
-                        <button className="text-black/50 cursor-pointer" onClick={() => setZoomEffect(defaultZoomEffect)} aria-label="Reset zoom effect">
-                          <ResetIcon />
-                        </button>
-                      </label>
-                      <div className="bg-stone-900/5 rounded-lg text-black/70 mb-2" style={{ padding: 2 }}>
-                        <div className="relative flex items-center">
-                          <div
-                            className={cn(
-                              "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
-                              zoomEffect.enabled && "translate-x-full",
-                            )}
-                          />
-                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ enabled: false })}>Off</button>
-                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ enabled: true })}>On</button>
-                        </div>
-                      </div>
-
-                      {zoomEffect.enabled && (
-                        <div className="flex flex-col gap-2 mb-1">
-                          <label className="font-normal text-black/80 text-xs">Zoom Point</label>
-                          <ZoomPointPad
-                            x={zoomEffect.pointX}
-                            y={zoomEffect.pointY}
-                            onChange={(x, y) => updateZoom({ pointX: x, pointY: y })}
-                          />
-
-                          <label className="font-normal mt-1 text-black/80 text-xs flex justify-between items-center">
-                            <span>Scale</span>
-                            <span className="font-mono text-black/50">{zoomEffect.scale.toFixed(2)}x</span>
-                          </label>
-                          <Slider
-                            max={3}
-                            step={0.05}
-                            min={1.1}
-                            value={[zoomEffect.scale]}
-                            onValueChange={(v) => updateZoom({ scale: v[0] })}
-                          />
-
-                          <label className="font-normal text-black/80 text-xs flex justify-between items-center">
-                            <span>Zoom Start</span>
-                            <span className="font-mono text-black/50">{zoomEffect.start.toFixed(2)}s</span>
-                          </label>
-                          <Slider
-                            max={Math.max(zoomEffect.end - frameDuration, 0)}
-                            step={frameDuration}
-                            min={0}
-                            value={[Math.min(zoomEffect.start, Math.max(zoomEffect.end - frameDuration, 0))]}
-                            onValueChange={(v) => updateZoom({ start: v[0] })}
-                          />
-
-                          <label className="font-normal text-black/80 text-xs flex justify-between items-center">
-                            <span>Zoom End</span>
-                            <span className="font-mono text-black/50">{zoomEffect.end.toFixed(2)}s</span>
-                          </label>
-                          <Slider
-                            max={Math.max(finalPreviewDuration, zoomEffect.end, 5)}
-                            step={frameDuration}
-                            min={Math.min(zoomEffect.start + frameDuration, Math.max(finalPreviewDuration, zoomEffect.end, 5))}
-                            value={[Math.max(zoomEffect.end, zoomEffect.start + frameDuration)]}
-                            onValueChange={(v) => updateZoom({ end: v[0] })}
-                          />
-
-                          <div className="flex gap-2">
-                            <div className="flex-1">
-                              <label className="font-normal text-black/80 text-xs flex justify-between items-center">
-                                <span>Ease In</span>
-                                <span className="font-mono text-black/50">{zoomEffect.easeIn.toFixed(2)}s</span>
-                              </label>
-                              <Slider max={2} step={0.05} min={0} value={[zoomEffect.easeIn]} onValueChange={(v) => updateZoom({ easeIn: v[0] })} />
-                            </div>
-                            <div className="flex-1">
-                              <label className="font-normal text-black/80 text-xs flex justify-between items-center">
-                                <span>Ease Out</span>
-                                <span className="font-mono text-black/50">{zoomEffect.easeOut.toFixed(2)}s</span>
-                              </label>
-                              <Slider max={2} step={0.05} min={0} value={[zoomEffect.easeOut]} onValueChange={(v) => updateZoom({ easeOut: v[0] })} />
-                            </div>
-                          </div>
-
-                          <label className="font-normal text-black/80 text-xs">Easing</label>
-                          <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
-                            <div className="relative flex items-center">
-                              <div
-                                className={cn(
-                                  "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
-                                  zoomEffect.easing === "linear" && "translate-x-full",
-                                )}
-                              />
-                              <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ easing: "easeInOut" })}>Ease In Out</button>
-                              <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ easing: "linear" })}>Linear</button>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      <hr className="my-1.5 border-none" />
                       <label className="font-normal mb-1 text-black/80 text-xs">Framerate</label>
                       <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
                         <div className="relative flex items-center">
@@ -1377,6 +1355,121 @@ export default function App() {
                 </span>
               </div>
             )}
+
+            <div className="flex flex-col gap-2 rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
+              <div className="flex items-center justify-between">
+                <span className="font-medium text-black/70">Zoom Effects</span>
+                <button
+                  className="flex h-6 cursor-pointer items-center gap-1 rounded-md bg-white/80 px-2 font-semibold text-black/70 shadow-sm transition-colors hover:bg-white disabled:cursor-default disabled:opacity-40"
+                  onClick={handleAddZoom}
+                  disabled={!findFreeZoomSlot(zoomKeyframes, zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime)}
+                >
+                  <PlusIcon />
+                  <span>Add Zoom</span>
+                </button>
+              </div>
+              <div
+                ref={zoomTrackRef}
+                className="relative h-9 w-full select-none rounded-md bg-stone-900/5"
+                onPointerMove={handleZoomDragMove}
+                onPointerUp={endZoomDrag}
+                onPointerCancel={endZoomDrag}
+              >
+                <div
+                  className="pointer-events-none absolute top-0 bottom-0 w-px bg-black/30"
+                  style={{ left: `${(Math.min(previewScrubTime, finalPreviewDuration) / zoomTimelineDuration) * 100}%` }}
+                />
+                {zoomKeyframes.map((kf) => {
+                  const leftPct = (kf.start / zoomTimelineDuration) * 100;
+                  const widthPct = ((kf.end - kf.start) / zoomTimelineDuration) * 100;
+                  const selected = kf.id === selectedZoomId;
+                  return (
+                    <div
+                      key={kf.id}
+                      className={cn(
+                        "absolute top-1 bottom-1 flex cursor-grab items-center rounded-md bg-blue-400/80 shadow-sm active:cursor-grabbing",
+                        selected && "ring-2 ring-blue-600",
+                      )}
+                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                      onPointerDown={(event) => beginZoomDrag(event, kf.id, "move")}
+                    >
+                      <div
+                        className="absolute -left-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
+                        onPointerDown={(event) => beginZoomDrag(event, kf.id, "resize-start")}
+                      />
+                      <span className="pointer-events-none truncate px-2 text-[10px] font-semibold text-white">Zoom</span>
+                      <div
+                        className="absolute -right-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
+                        onPointerDown={(event) => beginZoomDrag(event, kf.id, "resize-end")}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {selectedZoom && (
+                <div className="flex flex-col gap-2 rounded-md bg-stone-900/5 p-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[11px] font-medium text-black/70">
+                      {selectedZoom.start.toFixed(2)}s – {selectedZoom.end.toFixed(2)}s
+                    </span>
+                    <button
+                      className="cursor-pointer text-black/40 hover:text-red-500"
+                      onClick={() => handleDeleteZoom(selectedZoom.id)}
+                      aria-label="Delete zoom"
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                  <div className="flex gap-3">
+                    <div className="w-20 shrink-0">
+                      <label className="mb-1 block text-black/60">Zoom Point</label>
+                      <ZoomPointPad
+                        x={selectedZoom.pointX}
+                        y={selectedZoom.pointY}
+                        onChange={(x, y) => updateSelectedZoom({ pointX: x, pointY: y })}
+                      />
+                    </div>
+                    <div className="flex flex-1 flex-col gap-2">
+                      <label className="flex items-center justify-between text-black/60">
+                        <span>Scale</span>
+                        <span className="font-mono text-black/50">{selectedZoom.scale.toFixed(2)}x</span>
+                      </label>
+                      <Slider max={3} step={0.05} min={1.1} value={[selectedZoom.scale]} onValueChange={(v) => updateSelectedZoom({ scale: v[0] })} />
+                      <div className="flex gap-2">
+                        <div className="flex-1">
+                          <label className="flex items-center justify-between text-black/60">
+                            <span>Ease In</span>
+                            <span className="font-mono text-black/50">{selectedZoom.easeIn.toFixed(2)}s</span>
+                          </label>
+                          <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeIn]} onValueChange={(v) => updateSelectedZoom({ easeIn: v[0] })} />
+                        </div>
+                        <div className="flex-1">
+                          <label className="flex items-center justify-between text-black/60">
+                            <span>Ease Out</span>
+                            <span className="font-mono text-black/50">{selectedZoom.easeOut.toFixed(2)}s</span>
+                          </label>
+                          <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeOut]} onValueChange={(v) => updateSelectedZoom({ easeOut: v[0] })} />
+                        </div>
+                      </div>
+                      <div className="bg-white/70 rounded-lg text-black/70" style={{ padding: 2 }}>
+                        <div className="relative flex items-center">
+                          <div
+                            className={cn(
+                              "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
+                              selectedZoom.easing === "linear" && "translate-x-full",
+                            )}
+                          />
+                          <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "easeInOut" })}>Ease In Out</button>
+                          <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "linear" })}>Linear</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {videoFiles.map((file, idx) => {
               if (!file) return null;
 
@@ -1539,6 +1632,26 @@ function ZoomPointPad({ x, y, onChange }: { x: number; y: number; onChange: (x: 
         style={{ left: `${x}%`, top: `${y}%` }}
       />
     </div>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">
+      <path d="M8.75 2.75a.75.75 0 0 0-1.5 0V7.25H2.75a.75.75 0 0 0 0 1.5H7.25v4.5a.75.75 0 0 0 1.5 0V8.75h4.5a.75.75 0 0 0 0-1.5H8.75V2.75Z" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3.5 w-3.5">
+      <path
+        fillRule="evenodd"
+        d="M5 3.25V4H2.75a.75.75 0 0 0 0 1.5h.3l.815 8.15A1.5 1.5 0 0 0 5.357 15h5.285a1.5 1.5 0 0 0 1.493-1.35l.815-8.15h.3a.75.75 0 0 0 0-1.5H11v-.75A2.25 2.25 0 0 0 8.75 1h-1.5A2.25 2.25 0 0 0 5 3.25Zm2.25-.75a.75.75 0 0 0-.75.75V4h3v-.75a.75.75 0 0 0-.75-.75h-1.5ZM6.05 6a.75.75 0 0 1 .787.713l.275 5.5a.75.75 0 0 1-1.498.075l-.275-5.5A.75.75 0 0 1 6.05 6Zm3.9 0a.75.75 0 0 1 .712.787l-.275 5.5a.75.75 0 0 1-1.498-.075l.275-5.5a.75.75 0 0 1 .786-.712Z"
+        clipRule="evenodd"
+      />
+    </svg>
   );
 }
 
