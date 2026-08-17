@@ -38,12 +38,12 @@ type GenerateVideoParams = {
   videoStartTimes: number[];
   videoEndTimes: number[];
   deviceGapPercent: number;
-  zoomKeyframesByDevice: ZoomKeyframe[][];
+  zoomKeyframes: ZoomKeyframe[];
 };
 
 type GenerateImageParams = Omit<
   GenerateVideoParams,
-  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomKeyframesByDevice'
+  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomKeyframes'
 > & {
   imageFiles: File[];
 };
@@ -242,7 +242,7 @@ const useMediabunny = (): UseMediabunnyHook => {
     videoStartTimes,
     videoEndTimes,
     deviceGapPercent,
-    zoomKeyframesByDevice,
+    zoomKeyframes,
   }: GenerateVideoParams): Promise<void> => {
     setTranspilingStarted(true);
     setTranspilingFinished(false);
@@ -367,22 +367,10 @@ const useMediabunny = (): UseMediabunnyHook => {
         ctx.restore();
       };
 
-      // Zooms the whole device (backdrop + video + mockup overlay) around a
-      // focus point relative to the device's own bounding box.
-      const drawDeviceSlot = (slotIdx: number, slot: { posX: number; posY: number }, sample: VideoSample | undefined, relativeTime: number) => {
-        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframesByDevice[slotIdx] ?? [], relativeTime);
-        ctx.save();
-        if (zoomScale !== 1) {
-          const pivotX = slot.posX + (mockupWidth * pointX) / 100;
-          const pivotY = slot.posY + (mockupHeight * pointY) / 100;
-          ctx.translate(pivotX, pivotY);
-          ctx.scale(zoomScale, zoomScale);
-          ctx.translate(-pivotX, -pivotY);
-        }
+      const drawDeviceSlot = (slot: { posX: number; posY: number }, sample: VideoSample | undefined) => {
         drawBackdrop(slot);
         if (sample) drawVideoFrame(slot, sample);
         drawMockupOverlay(slot);
-        ctx.restore();
       };
 
       const conversion = await Conversion.init({
@@ -398,13 +386,9 @@ const useMediabunny = (): UseMediabunnyHook => {
           alpha: transparentBackground ? 'keep' : 'discard',
           process: async (driverSample) => {
             ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-            if (!transparentBackground) {
-              paintBackground(ctx, canvasWidth, canvasHeight, background, backgroundImage);
-            }
 
             const t = driverSample.timestamp;
             const samplesByIdx = new Map<number, VideoSample>();
-            const relativeTimesByIdx = new Map<number, number>();
 
             for (const entry of sampleSinks) {
               let relativeTime: number;
@@ -416,7 +400,6 @@ const useMediabunny = (): UseMediabunnyHook => {
               let sampleTime = entry.startTime + relativeTime;
               sampleTime = Math.min(sampleTime, Math.max(entry.endTime - frameDuration, entry.startTime));
               const sample = await entry.sink.getSample(sampleTime);
-              relativeTimesByIdx.set(entry.idx, relativeTime);
               if (sample) {
                 if (entry.lastSample && entry.lastSample !== sample) {
                   entry.lastSample.close();
@@ -428,9 +411,25 @@ const useMediabunny = (): UseMediabunnyHook => {
               }
             }
 
-            for (let i = 0; i < count; i++) {
-              drawDeviceSlot(i, slots[i], samplesByIdx.get(i), relativeTimesByIdx.get(i) ?? 0);
+            // Zooms the whole scene (background + every device) together,
+            // around a focus point relative to the full output frame.
+            const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, t);
+            ctx.save();
+            if (zoomScale !== 1) {
+              const pivotX = (canvasWidth * pointX) / 100;
+              const pivotY = (canvasHeight * pointY) / 100;
+              ctx.translate(pivotX, pivotY);
+              ctx.scale(zoomScale, zoomScale);
+              ctx.translate(-pivotX, -pivotY);
             }
+
+            if (!transparentBackground) {
+              paintBackground(ctx, canvasWidth, canvasHeight, background, backgroundImage);
+            }
+            for (let i = 0; i < count; i++) {
+              drawDeviceSlot(slots[i], samplesByIdx.get(i));
+            }
+            ctx.restore();
 
             return canvas;
           },
