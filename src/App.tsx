@@ -65,8 +65,10 @@ export default function App() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCompleted, setPreviewCompleted] = useState(false);
   const [previewScrubTime, setPreviewScrubTime] = useState(0);
-  const [zoomKeyframes, setZoomKeyframes] = useState<ZoomKeyframe[]>([]);
+  const [editorMode, setEditorMode] = useState<"simple" | "timeline">("simple");
+  const [zoomKeyframesByDevice, setZoomKeyframesByDevice] = useState<ZoomKeyframe[][]>([[]]);
   const [selectedZoomId, setSelectedZoomId] = useState<string | null>(null);
+  const [activeLayerIdx, setActiveLayerIdx] = useState(0);
 
   const [videoFiles, setVideoFiles] = useState<(File | null)[]>([null]);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
@@ -76,8 +78,9 @@ export default function App() {
   const [videoEndOffsets, setVideoEndOffsets] = useState<number[]>([0]);
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([]);
   const zoomWrapperRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const zoomTrackRef = useRef<HTMLDivElement | null>(null);
+  const zoomTrackRefs = useRef<(HTMLDivElement | null)[]>([]);
   const zoomDragRef = useRef<{
+    deviceIdx: number;
     id: string;
     mode: "move" | "resize-start" | "resize-end";
     startClientX: number;
@@ -136,8 +139,11 @@ export default function App() {
     setVideoDimensions((prev) => resize(prev, null));
     setVideoStartOffsets((prev) => resize(prev, 0));
     setVideoEndOffsets((prev) => resize(prev, 0));
+    setZoomKeyframesByDevice((prev) => resize(prev, [] as ZoomKeyframe[]));
+    setActiveLayerIdx((prev) => Math.min(prev, deviceCount - 1));
     videoRefs.current = videoRefs.current.slice(0, deviceCount);
     zoomWrapperRefs.current = zoomWrapperRefs.current.slice(0, deviceCount);
+    zoomTrackRefs.current = zoomTrackRefs.current.slice(0, deviceCount);
   }, [deviceCount]);
 
   useEffect(() => {
@@ -253,6 +259,9 @@ export default function App() {
     setVideoDimensions(Array(deviceCount).fill(null));
     setVideoStartOffsets(Array(deviceCount).fill(0));
     setVideoEndOffsets(Array(deviceCount).fill(0));
+    setZoomKeyframesByDevice(Array.from({ length: deviceCount }, () => []));
+    setSelectedZoomId(null);
+    setActiveLayerIdx(0);
     videoRefs.current = [];
     setExportFormat("mp4");
     reset();
@@ -319,47 +328,59 @@ export default function App() {
   }, [finalPreviewDuration, loopShorter, videoDurations, videoEndOffsets, videoStartOffsets]);
 
   const zoomTimelineDuration = Math.max(finalPreviewDuration, 1);
-  const selectedZoom = zoomKeyframes.find((k) => k.id === selectedZoomId) ?? null;
+  const activeZoomKeyframes = zoomKeyframesByDevice[activeLayerIdx] ?? [];
+  const selectedZoom = activeZoomKeyframes.find((k) => k.id === selectedZoomId) ?? null;
+  const hasAnyZoomKeyframes = zoomKeyframesByDevice.some((kfs) => kfs.length > 0);
+
+  const updateZoomKeyframesFor = useCallback((deviceIdx: number, updater: (kfs: ZoomKeyframe[]) => ZoomKeyframe[]) => {
+    setZoomKeyframesByDevice((prev) => prev.map((kfs, i) => (i === deviceIdx ? updater(kfs) : kfs)));
+  }, []);
 
   const updateSelectedZoom = useCallback((patch: Partial<ZoomKeyframe>) => {
     if (!selectedZoomId) return;
-    setZoomKeyframes((prev) => prev.map((k) => (k.id === selectedZoomId ? { ...k, ...patch } : k)));
-  }, [selectedZoomId]);
+    updateZoomKeyframesFor(activeLayerIdx, (kfs) => kfs.map((k) => (k.id === selectedZoomId ? { ...k, ...patch } : k)));
+  }, [activeLayerIdx, selectedZoomId, updateZoomKeyframesFor]);
 
-  const handleAddZoom = useCallback(() => {
-    const slot = findFreeZoomSlot(zoomKeyframes, zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime);
+  const handleAddZoom = useCallback((deviceIdx: number) => {
+    const kfs = zoomKeyframesByDevice[deviceIdx] ?? [];
+    const slot = findFreeZoomSlot(kfs, zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime);
     if (!slot) return;
     const kf = createZoomKeyframe(slot);
-    setZoomKeyframes((prev) => [...prev, kf]);
+    updateZoomKeyframesFor(deviceIdx, (prev) => [...prev, kf]);
+    setActiveLayerIdx(deviceIdx);
     setSelectedZoomId(kf.id);
-  }, [previewScrubTime, zoomKeyframes, zoomTimelineDuration]);
+  }, [previewScrubTime, updateZoomKeyframesFor, zoomKeyframesByDevice, zoomTimelineDuration]);
 
-  const handleDeleteZoom = useCallback((id: string) => {
-    setZoomKeyframes((prev) => prev.filter((k) => k.id !== id));
+  const handleDeleteZoom = useCallback((deviceIdx: number, id: string) => {
+    updateZoomKeyframesFor(deviceIdx, (prev) => prev.filter((k) => k.id !== id));
     setSelectedZoomId((prev) => (prev === id ? null : prev));
-  }, []);
+  }, [updateZoomKeyframesFor]);
 
-  const beginZoomDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>, id: string, mode: "move" | "resize-start" | "resize-end") => {
-    const kf = zoomKeyframes.find((k) => k.id === id);
+  const beginZoomDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>, deviceIdx: number, id: string, mode: "move" | "resize-start" | "resize-end") => {
+    const kfs = zoomKeyframesByDevice[deviceIdx] ?? [];
+    const kf = kfs.find((k) => k.id === id);
     if (!kf) return;
     event.stopPropagation();
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    setActiveLayerIdx(deviceIdx);
     setSelectedZoomId(id);
     zoomDragRef.current = {
+      deviceIdx,
       id,
       mode,
       startClientX: event.clientX,
       originStart: kf.start,
       originEnd: kf.end,
-      bounds: computeZoomDragBounds(zoomKeyframes, id, zoomTimelineDuration),
+      bounds: computeZoomDragBounds(kfs, id, zoomTimelineDuration),
     };
-  }, [zoomKeyframes, zoomTimelineDuration]);
+  }, [zoomKeyframesByDevice, zoomTimelineDuration]);
 
   const handleZoomDragMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = zoomDragRef.current;
-    const trackEl = zoomTrackRef.current;
-    if (!drag || !trackEl) return;
+    if (!drag) return;
+    const trackEl = zoomTrackRefs.current[drag.deviceIdx];
+    if (!trackEl) return;
     const rect = trackEl.getBoundingClientRect();
     if (rect.width === 0) return;
     const deltaSeconds = ((event.clientX - drag.startClientX) / rect.width) * zoomTimelineDuration;
@@ -370,8 +391,8 @@ export default function App() {
         ? clampZoomResizeStart(drag.originEnd, drag.originStart + deltaSeconds, drag.bounds)
         : clampZoomResizeEnd(drag.originStart, drag.originEnd + deltaSeconds, drag.bounds);
 
-    setZoomKeyframes((prev) => prev.map((k) => (k.id === drag.id ? { ...k, ...next } : k)));
-  }, [zoomTimelineDuration]);
+    updateZoomKeyframesFor(drag.deviceIdx, (prev) => prev.map((k) => (k.id === drag.id ? { ...k, ...next } : k)));
+  }, [updateZoomKeyframesFor, zoomTimelineDuration]);
 
   const endZoomDrag = useCallback(() => {
     zoomDragRef.current = null;
@@ -380,13 +401,13 @@ export default function App() {
   const applyZoomStyle = useCallback((idx: number, relativeTime: number) => {
     const el = zoomWrapperRefs.current[idx];
     if (!el) return;
-    const { scale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
+    const { scale, pointX, pointY } = getActiveZoom(zoomKeyframesByDevice[idx] ?? [], relativeTime);
     el.style.transformOrigin = `${pointX}% ${pointY}%`;
     el.style.transform = scale !== 1 ? `scale(${scale})` : "";
-  }, [zoomKeyframes]);
+  }, [zoomKeyframesByDevice]);
 
   useEffect(() => {
-    if (mediaMode !== "video" || zoomKeyframes.length === 0 || !previewPlaying) return;
+    if (mediaMode !== "video" || !hasAnyZoomKeyframes || !previewPlaying) return;
     let raf: number;
     const tick = () => {
       videoRefs.current.forEach((video, idx) => {
@@ -397,7 +418,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [applyZoomStyle, getTrimStartForVideo, mediaMode, previewPlaying, zoomKeyframes.length]);
+  }, [applyZoomStyle, getTrimStartForVideo, hasAnyZoomKeyframes, mediaMode, previewPlaying]);
 
   useEffect(() => {
     if (mediaMode !== "video" || previewPlaying) return;
@@ -592,7 +613,7 @@ export default function App() {
       videoStartTimes: videoStartOffsets.slice(0, deviceCount),
       videoEndTimes: videoEndOffsets.slice(0, deviceCount),
       deviceGapPercent,
-      zoomKeyframes,
+      zoomKeyframesByDevice: zoomKeyframesByDevice.slice(0, deviceCount),
     });
   };
 
@@ -615,8 +636,9 @@ export default function App() {
     setSelectedMockup(defaultMockup);
     setSelectedAspectRatio(defaultAspectRatio);
     setExportFormat("mp4");
-    setZoomKeyframes([]);
+    setZoomKeyframesByDevice(Array.from({ length: deviceCount }, () => []));
     setSelectedZoomId(null);
+    setActiveLayerIdx(0);
     reset();
   };
 
@@ -625,6 +647,115 @@ export default function App() {
     setPreviewCompleted(false);
     seekAllVideosToTrimStart();
     reset();
+  };
+
+  const renderZoomTrack = (deviceIdx: number) => {
+    const kfs = zoomKeyframesByDevice[deviceIdx] ?? [];
+    return (
+      <div
+        ref={(el) => { zoomTrackRefs.current[deviceIdx] = el; }}
+        className="relative h-9 w-full select-none rounded-md bg-stone-900/5"
+        onPointerMove={handleZoomDragMove}
+        onPointerUp={endZoomDrag}
+        onPointerCancel={endZoomDrag}
+      >
+        <div
+          className="pointer-events-none absolute top-0 bottom-0 w-px bg-black/30"
+          style={{ left: `${(Math.min(previewScrubTime, finalPreviewDuration) / zoomTimelineDuration) * 100}%` }}
+        />
+        {kfs.map((kf) => {
+          const leftPct = (kf.start / zoomTimelineDuration) * 100;
+          const widthPct = ((kf.end - kf.start) / zoomTimelineDuration) * 100;
+          const selected = activeLayerIdx === deviceIdx && kf.id === selectedZoomId;
+          return (
+            <div
+              key={kf.id}
+              className={cn(
+                "absolute top-1 bottom-1 flex cursor-grab items-center rounded-md bg-blue-400/80 shadow-sm active:cursor-grabbing",
+                selected && "ring-2 ring-blue-600",
+              )}
+              style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+              onPointerDown={(event) => beginZoomDrag(event, deviceIdx, kf.id, "move")}
+            >
+              <div
+                className="absolute -left-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
+                onPointerDown={(event) => beginZoomDrag(event, deviceIdx, kf.id, "resize-start")}
+              />
+              <span className="pointer-events-none truncate px-2 text-[10px] font-semibold text-white">Zoom</span>
+              <div
+                className="absolute -right-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
+                onPointerDown={(event) => beginZoomDrag(event, deviceIdx, kf.id, "resize-end")}
+              />
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderZoomPropertiesPanel = () => {
+    if (!selectedZoom) return null;
+    return (
+      <div className="flex flex-col gap-2 rounded-md bg-stone-900/5 p-2">
+        <div className="flex items-center justify-between">
+          <span className="font-mono text-[11px] font-medium text-black/70">
+            {selectedZoom.start.toFixed(2)}s – {selectedZoom.end.toFixed(2)}s
+          </span>
+          <button
+            className="cursor-pointer text-black/40 hover:text-red-500"
+            onClick={() => handleDeleteZoom(activeLayerIdx, selectedZoom.id)}
+            aria-label="Delete zoom"
+          >
+            <TrashIcon />
+          </button>
+        </div>
+        <div className="flex gap-3">
+          <div className="w-20 shrink-0">
+            <label className="mb-1 block text-black/60">Zoom Point</label>
+            <ZoomPointPad
+              x={selectedZoom.pointX}
+              y={selectedZoom.pointY}
+              onChange={(x, y) => updateSelectedZoom({ pointX: x, pointY: y })}
+            />
+          </div>
+          <div className="flex flex-1 flex-col gap-2">
+            <label className="flex items-center justify-between text-black/60">
+              <span>Scale</span>
+              <span className="font-mono text-black/50">{selectedZoom.scale.toFixed(2)}x</span>
+            </label>
+            <Slider max={3} step={0.05} min={1.1} value={[selectedZoom.scale]} onValueChange={(v) => updateSelectedZoom({ scale: v[0] })} />
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="flex items-center justify-between text-black/60">
+                  <span>Ease In</span>
+                  <span className="font-mono text-black/50">{selectedZoom.easeIn.toFixed(2)}s</span>
+                </label>
+                <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeIn]} onValueChange={(v) => updateSelectedZoom({ easeIn: v[0] })} />
+              </div>
+              <div className="flex-1">
+                <label className="flex items-center justify-between text-black/60">
+                  <span>Ease Out</span>
+                  <span className="font-mono text-black/50">{selectedZoom.easeOut.toFixed(2)}s</span>
+                </label>
+                <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeOut]} onValueChange={(v) => updateSelectedZoom({ easeOut: v[0] })} />
+              </div>
+            </div>
+            <div className="bg-white/70 rounded-lg text-black/70" style={{ padding: 2 }}>
+              <div className="relative flex items-center">
+                <div
+                  className={cn(
+                    "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
+                    selectedZoom.easing === "linear" && "translate-x-full",
+                  )}
+                />
+                <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "easeInOut" })}>Ease In Out</button>
+                <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "linear" })}>Linear</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   };
 
   return (
@@ -1354,119 +1485,90 @@ export default function App() {
               </div>
             )}
 
-            <div className="flex flex-col gap-2 rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-black/70">Zoom Effects</span>
-                <button
-                  className="flex h-6 cursor-pointer items-center gap-1 rounded-md bg-white/80 px-2 font-semibold text-black/70 shadow-sm transition-colors hover:bg-white disabled:cursor-default disabled:opacity-40"
-                  onClick={handleAddZoom}
-                  disabled={!findFreeZoomSlot(zoomKeyframes, zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime)}
-                >
-                  <PlusIcon />
-                  <span>Add Zoom</span>
-                </button>
-              </div>
-              <div
-                ref={zoomTrackRef}
-                className="relative h-9 w-full select-none rounded-md bg-stone-900/5"
-                onPointerMove={handleZoomDragMove}
-                onPointerUp={endZoomDrag}
-                onPointerCancel={endZoomDrag}
-              >
-                <div
-                  className="pointer-events-none absolute top-0 bottom-0 w-px bg-black/30"
-                  style={{ left: `${(Math.min(previewScrubTime, finalPreviewDuration) / zoomTimelineDuration) * 100}%` }}
-                />
-                {zoomKeyframes.map((kf) => {
-                  const leftPct = (kf.start / zoomTimelineDuration) * 100;
-                  const widthPct = ((kf.end - kf.start) / zoomTimelineDuration) * 100;
-                  const selected = kf.id === selectedZoomId;
-                  return (
-                    <div
-                      key={kf.id}
-                      className={cn(
-                        "absolute top-1 bottom-1 flex cursor-grab items-center rounded-md bg-blue-400/80 shadow-sm active:cursor-grabbing",
-                        selected && "ring-2 ring-blue-600",
-                      )}
-                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                      onPointerDown={(event) => beginZoomDrag(event, kf.id, "move")}
-                    >
-                      <div
-                        className="absolute -left-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
-                        onPointerDown={(event) => beginZoomDrag(event, kf.id, "resize-start")}
-                      />
-                      <span className="pointer-events-none truncate px-2 text-[10px] font-semibold text-white">Zoom</span>
-                      <div
-                        className="absolute -right-1 top-0 bottom-0 w-2.5 cursor-ew-resize"
-                        onPointerDown={(event) => beginZoomDrag(event, kf.id, "resize-end")}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
-
-              {selectedZoom && (
-                <div className="flex flex-col gap-2 rounded-md bg-stone-900/5 p-2">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-[11px] font-medium text-black/70">
-                      {selectedZoom.start.toFixed(2)}s – {selectedZoom.end.toFixed(2)}s
-                    </span>
-                    <button
-                      className="cursor-pointer text-black/40 hover:text-red-500"
-                      onClick={() => handleDeleteZoom(selectedZoom.id)}
-                      aria-label="Delete zoom"
-                    >
-                      <TrashIcon />
-                    </button>
-                  </div>
-                  <div className="flex gap-3">
-                    <div className="w-20 shrink-0">
-                      <label className="mb-1 block text-black/60">Zoom Point</label>
-                      <ZoomPointPad
-                        x={selectedZoom.pointX}
-                        y={selectedZoom.pointY}
-                        onChange={(x, y) => updateSelectedZoom({ pointX: x, pointY: y })}
-                      />
-                    </div>
-                    <div className="flex flex-1 flex-col gap-2">
-                      <label className="flex items-center justify-between text-black/60">
-                        <span>Scale</span>
-                        <span className="font-mono text-black/50">{selectedZoom.scale.toFixed(2)}x</span>
-                      </label>
-                      <Slider max={3} step={0.05} min={1.1} value={[selectedZoom.scale]} onValueChange={(v) => updateSelectedZoom({ scale: v[0] })} />
-                      <div className="flex gap-2">
-                        <div className="flex-1">
-                          <label className="flex items-center justify-between text-black/60">
-                            <span>Ease In</span>
-                            <span className="font-mono text-black/50">{selectedZoom.easeIn.toFixed(2)}s</span>
-                          </label>
-                          <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeIn]} onValueChange={(v) => updateSelectedZoom({ easeIn: v[0] })} />
-                        </div>
-                        <div className="flex-1">
-                          <label className="flex items-center justify-between text-black/60">
-                            <span>Ease Out</span>
-                            <span className="font-mono text-black/50">{selectedZoom.easeOut.toFixed(2)}s</span>
-                          </label>
-                          <Slider max={2} step={0.05} min={0} value={[selectedZoom.easeOut]} onValueChange={(v) => updateSelectedZoom({ easeOut: v[0] })} />
-                        </div>
-                      </div>
-                      <div className="bg-white/70 rounded-lg text-black/70" style={{ padding: 2 }}>
-                        <div className="relative flex items-center">
-                          <div
-                            className={cn(
-                              "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
-                              selectedZoom.easing === "linear" && "translate-x-full",
-                            )}
-                          />
-                          <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "easeInOut" })}>Ease In Out</button>
-                          <button className="relative flex-1 text-[11px] font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateSelectedZoom({ easing: "linear" })}>Linear</button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+            <div className="flex items-center justify-between rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
+              <span className="font-medium text-black/70">Editor</span>
+              <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
+                <div className="relative flex items-center">
+                  <div
+                    className={cn(
+                      "absolute inset-y-0 left-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
+                      editorMode === "timeline" && "translate-x-full",
+                    )}
+                  />
+                  <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5 px-3" onClick={() => setEditorMode("simple")}>Simple</button>
+                  <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5 px-3" onClick={() => setEditorMode("timeline")}>Timeline</button>
                 </div>
-              )}
+              </div>
             </div>
+
+            {editorMode === "simple" ? (
+              <div className="flex flex-col gap-2 rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-black/70">Zoom Effects</span>
+                  <button
+                    className="flex h-6 cursor-pointer items-center gap-1 rounded-md bg-white/80 px-2 font-semibold text-black/70 shadow-sm transition-colors hover:bg-white disabled:cursor-default disabled:opacity-40"
+                    onClick={() => handleAddZoom(activeLayerIdx)}
+                    disabled={!findFreeZoomSlot(zoomKeyframesByDevice[activeLayerIdx] ?? [], zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime)}
+                  >
+                    <PlusIcon />
+                    <span>Add Zoom</span>
+                  </button>
+                </div>
+                {deviceCount > 1 && (
+                  <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
+                    <div className="relative flex items-center">
+                      <div
+                        className="absolute inset-y-0 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow"
+                        style={{ width: `${100 / deviceCount}%`, left: `${(activeLayerIdx * 100) / deviceCount}%` }}
+                      />
+                      {Array.from({ length: deviceCount }).map((_, i) => (
+                        <button
+                          key={i}
+                          className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5"
+                          onClick={() => setActiveLayerIdx(i)}
+                        >
+                          {i + 1}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {renderZoomTrack(activeLayerIdx)}
+                {renderZoomPropertiesPanel()}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2 rounded-md bg-white/60 px-2.5 py-2 text-xs text-black/60 shadow-sm ring-1 ring-black/5 backdrop-blur-xl">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-black/70">Timeline</span>
+                  <button
+                    className="flex h-6 cursor-pointer items-center gap-1 rounded-md bg-white/80 px-2 font-semibold text-black/70 shadow-sm transition-colors hover:bg-white disabled:cursor-default disabled:opacity-40"
+                    onClick={() => handleAddZoom(activeLayerIdx)}
+                    disabled={!findFreeZoomSlot(zoomKeyframesByDevice[activeLayerIdx] ?? [], zoomTimelineDuration, DEFAULT_ZOOM_DURATION, previewScrubTime)}
+                  >
+                    <PlusIcon />
+                    <span>Add Zoom</span>
+                  </button>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {Array.from({ length: deviceCount }).map((_, deviceIdx) => (
+                    <div key={deviceIdx} className="flex items-center gap-2">
+                      <button
+                        className={cn(
+                          "flex h-9 w-6 shrink-0 items-center justify-center rounded-md font-mono text-[11px] font-semibold cursor-pointer",
+                          activeLayerIdx === deviceIdx ? "bg-blue-500 text-white" : "bg-stone-900/10 text-black/50 hover:bg-stone-900/20",
+                        )}
+                        onClick={() => setActiveLayerIdx(deviceIdx)}
+                        aria-label={`Select layer ${deviceIdx + 1}`}
+                      >
+                        {deviceIdx + 1}
+                      </button>
+                      {renderZoomTrack(deviceIdx)}
+                    </div>
+                  ))}
+                </div>
+                {renderZoomPropertiesPanel()}
+              </div>
+            )}
 
             {videoFiles.map((file, idx) => {
               if (!file) return null;

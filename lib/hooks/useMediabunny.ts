@@ -38,12 +38,12 @@ type GenerateVideoParams = {
   videoStartTimes: number[];
   videoEndTimes: number[];
   deviceGapPercent: number;
-  zoomKeyframes: ZoomKeyframe[];
+  zoomKeyframesByDevice: ZoomKeyframe[][];
 };
 
 type GenerateImageParams = Omit<
   GenerateVideoParams,
-  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomKeyframes'
+  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomKeyframesByDevice'
 > & {
   imageFiles: File[];
 };
@@ -242,7 +242,7 @@ const useMediabunny = (): UseMediabunnyHook => {
     videoStartTimes,
     videoEndTimes,
     deviceGapPercent,
-    zoomKeyframes,
+    zoomKeyframesByDevice,
   }: GenerateVideoParams): Promise<void> => {
     setTranspilingStarted(true);
     setTranspilingFinished(false);
@@ -369,8 +369,8 @@ const useMediabunny = (): UseMediabunnyHook => {
 
       // Zooms the whole device (backdrop + video + mockup overlay) around a
       // focus point relative to the device's own bounding box.
-      const drawDeviceSlot = (slot: { posX: number; posY: number }, sample: VideoSample | undefined, relativeTime: number) => {
-        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, relativeTime);
+      const drawDeviceSlot = (slotIdx: number, slot: { posX: number; posY: number }, sample: VideoSample | undefined, relativeTime: number) => {
+        const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframesByDevice[slotIdx] ?? [], relativeTime);
         ctx.save();
         if (zoomScale !== 1) {
           const pivotX = slot.posX + (mockupWidth * pointX) / 100;
@@ -429,7 +429,7 @@ const useMediabunny = (): UseMediabunnyHook => {
             }
 
             for (let i = 0; i < count; i++) {
-              drawDeviceSlot(slots[i], samplesByIdx.get(i), relativeTimesByIdx.get(i) ?? 0);
+              drawDeviceSlot(i, slots[i], samplesByIdx.get(i), relativeTimesByIdx.get(i) ?? 0);
             }
 
             return canvas;
