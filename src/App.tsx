@@ -31,8 +31,9 @@ import {
   snapToFrame,
   type VideoDimensions,
 } from "@/lib/videoTrim";
+import { defaultZoomEffect, getZoomScale, type ZoomEffect } from "@/lib/zoomEffect";
 import { Popover, PopoverTrigger, PopoverContent } from "@radix-ui/react-popover";
-import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type DeviceCount = 1 | 2 | 3;
 type BgTab = "color" | "gradient" | "image";
@@ -54,6 +55,7 @@ export default function App() {
   const [previewPlaying, setPreviewPlaying] = useState(false);
   const [previewCompleted, setPreviewCompleted] = useState(false);
   const [previewScrubTime, setPreviewScrubTime] = useState(0);
+  const [zoomEffect, setZoomEffect] = useState<ZoomEffect>(defaultZoomEffect);
 
   const [videoFiles, setVideoFiles] = useState<(File | null)[]>([null]);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
@@ -62,6 +64,7 @@ export default function App() {
   const [videoStartOffsets, setVideoStartOffsets] = useState<number[]>([0]);
   const [videoEndOffsets, setVideoEndOffsets] = useState<number[]>([0]);
   const videoRefs = useRef<(HTMLVideoElement | null)[]>([]);
+  const zoomWrapperRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [activeDragIdx, setActiveDragIdx] = useState<number | null>(null);
 
   const [bgTab, setBgTab] = useState<BgTab>("color");
@@ -114,6 +117,7 @@ export default function App() {
     setVideoStartOffsets((prev) => resize(prev, 0));
     setVideoEndOffsets((prev) => resize(prev, 0));
     videoRefs.current = videoRefs.current.slice(0, deviceCount);
+    zoomWrapperRefs.current = zoomWrapperRefs.current.slice(0, deviceCount);
   }, [deviceCount]);
 
   useEffect(() => {
@@ -293,6 +297,41 @@ export default function App() {
     const relativeTime = Math.min(previewTime, Math.max(trimDuration - 0.001, 0));
     return Math.min(start + relativeTime, Math.max(end - 0.001, start));
   }, [finalPreviewDuration, loopShorter, videoDurations, videoEndOffsets, videoStartOffsets]);
+
+  const updateZoom = useCallback((patch: Partial<ZoomEffect>) => {
+    setZoomEffect((z) => ({ ...z, ...patch }));
+  }, []);
+
+  const applyZoomStyle = useCallback((idx: number, relativeTime: number) => {
+    const el = zoomWrapperRefs.current[idx];
+    if (!el) return;
+    const scale = getZoomScale(zoomEffect, relativeTime);
+    el.style.transformOrigin = `${zoomEffect.pointX}% ${zoomEffect.pointY}%`;
+    el.style.transform = scale !== 1 ? `scale(${scale})` : "";
+  }, [zoomEffect]);
+
+  useEffect(() => {
+    if (mediaMode !== "video" || !zoomEffect.enabled || !previewPlaying) return;
+    let raf: number;
+    const tick = () => {
+      videoRefs.current.forEach((video, idx) => {
+        if (!video) return;
+        applyZoomStyle(idx, video.currentTime - getTrimStartForVideo(idx));
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [applyZoomStyle, getTrimStartForVideo, mediaMode, previewPlaying, zoomEffect.enabled]);
+
+  useEffect(() => {
+    if (mediaMode !== "video" || previewPlaying) return;
+    videoRefs.current.forEach((video, idx) => {
+      if (!video) return;
+      const relativeTime = getVideoTimeAtPreviewTime(idx, previewScrubTime) - getTrimStartForVideo(idx);
+      applyZoomStyle(idx, relativeTime);
+    });
+  }, [applyZoomStyle, getTrimStartForVideo, getVideoTimeAtPreviewTime, mediaMode, previewPlaying, previewScrubTime, videoFiles]);
 
   const seekAllVideosToPreviewTime = useCallback((previewTime: number) => {
     videoRefs.current.forEach((video, idx) => {
@@ -478,6 +517,7 @@ export default function App() {
       videoStartTimes: videoStartOffsets.slice(0, deviceCount),
       videoEndTimes: videoEndOffsets.slice(0, deviceCount),
       deviceGapPercent,
+      zoomEffect,
     });
   };
 
@@ -500,6 +540,7 @@ export default function App() {
     setSelectedMockup(defaultMockup);
     setSelectedAspectRatio(defaultAspectRatio);
     setExportFormat("mp4");
+    setZoomEffect(defaultZoomEffect);
     reset();
   };
 
@@ -634,6 +675,10 @@ export default function App() {
                           height: `${(selectedMockup.innerHeight / selectedMockup.height) * 100 * 1.01}%`,
                         }}
                       >
+                      <div
+                        ref={(el) => { zoomWrapperRefs.current[idx] = el; }}
+                        className="w-full h-full"
+                      >
                         {file && url && mediaMode === "video" && (
                           <video
                             controls={false}
@@ -710,6 +755,7 @@ export default function App() {
                             draggable={false}
                           />
                         )}
+                      </div>
                       </div>
 
                       <img
@@ -947,6 +993,104 @@ export default function App() {
 
                   {mediaMode === "video" && (
                     <>
+                      <hr className="my-1.5 border-none" />
+                      <label className="font-normal mb-1 text-black/80 text-xs flex justify-between items-center">
+                        Zoom Effect
+                        <button className="text-black/50 cursor-pointer" onClick={() => setZoomEffect(defaultZoomEffect)} aria-label="Reset zoom effect">
+                          <ResetIcon />
+                        </button>
+                      </label>
+                      <div className="bg-stone-900/5 rounded-lg text-black/70 mb-2" style={{ padding: 2 }}>
+                        <div className="relative flex items-center">
+                          <div
+                            className={cn(
+                              "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
+                              zoomEffect.enabled && "translate-x-full",
+                            )}
+                          />
+                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ enabled: false })}>Off</button>
+                          <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ enabled: true })}>On</button>
+                        </div>
+                      </div>
+
+                      {zoomEffect.enabled && (
+                        <div className="flex flex-col gap-2 mb-1">
+                          <label className="font-normal text-black/80 text-xs">Zoom Point</label>
+                          <ZoomPointPad
+                            x={zoomEffect.pointX}
+                            y={zoomEffect.pointY}
+                            onChange={(x, y) => updateZoom({ pointX: x, pointY: y })}
+                          />
+
+                          <label className="font-normal mt-1 text-black/80 text-xs flex justify-between items-center">
+                            <span>Scale</span>
+                            <span className="font-mono text-black/50">{zoomEffect.scale.toFixed(2)}x</span>
+                          </label>
+                          <Slider
+                            max={3}
+                            step={0.05}
+                            min={1.1}
+                            value={[zoomEffect.scale]}
+                            onValueChange={(v) => updateZoom({ scale: v[0] })}
+                          />
+
+                          <label className="font-normal text-black/80 text-xs flex justify-between items-center">
+                            <span>Zoom Start</span>
+                            <span className="font-mono text-black/50">{zoomEffect.start.toFixed(2)}s</span>
+                          </label>
+                          <Slider
+                            max={Math.max(zoomEffect.end - frameDuration, 0)}
+                            step={frameDuration}
+                            min={0}
+                            value={[Math.min(zoomEffect.start, Math.max(zoomEffect.end - frameDuration, 0))]}
+                            onValueChange={(v) => updateZoom({ start: v[0] })}
+                          />
+
+                          <label className="font-normal text-black/80 text-xs flex justify-between items-center">
+                            <span>Zoom End</span>
+                            <span className="font-mono text-black/50">{zoomEffect.end.toFixed(2)}s</span>
+                          </label>
+                          <Slider
+                            max={Math.max(finalPreviewDuration, zoomEffect.end, 5)}
+                            step={frameDuration}
+                            min={Math.min(zoomEffect.start + frameDuration, Math.max(finalPreviewDuration, zoomEffect.end, 5))}
+                            value={[Math.max(zoomEffect.end, zoomEffect.start + frameDuration)]}
+                            onValueChange={(v) => updateZoom({ end: v[0] })}
+                          />
+
+                          <div className="flex gap-2">
+                            <div className="flex-1">
+                              <label className="font-normal text-black/80 text-xs flex justify-between items-center">
+                                <span>Ease In</span>
+                                <span className="font-mono text-black/50">{zoomEffect.easeIn.toFixed(2)}s</span>
+                              </label>
+                              <Slider max={2} step={0.05} min={0} value={[zoomEffect.easeIn]} onValueChange={(v) => updateZoom({ easeIn: v[0] })} />
+                            </div>
+                            <div className="flex-1">
+                              <label className="font-normal text-black/80 text-xs flex justify-between items-center">
+                                <span>Ease Out</span>
+                                <span className="font-mono text-black/50">{zoomEffect.easeOut.toFixed(2)}s</span>
+                              </label>
+                              <Slider max={2} step={0.05} min={0} value={[zoomEffect.easeOut]} onValueChange={(v) => updateZoom({ easeOut: v[0] })} />
+                            </div>
+                          </div>
+
+                          <label className="font-normal text-black/80 text-xs">Easing</label>
+                          <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
+                            <div className="relative flex items-center">
+                              <div
+                                className={cn(
+                                  "absolute left-0 inset-y-0 w-1/2 flex bg-white transition-all ease-in-out duration-200 transform rounded-md shadow",
+                                  zoomEffect.easing === "linear" && "translate-x-full",
+                                )}
+                              />
+                              <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ easing: "easeInOut" })}>Ease In Out</button>
+                              <button className="relative flex-1 text-xs font-semibold items-center justify-center cursor-pointer m-px p-px py-0.5" onClick={() => updateZoom({ easing: "linear" })}>Linear</button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <hr className="my-1.5 border-none" />
                       <label className="font-normal mb-1 text-black/80 text-xs">Framerate</label>
                       <div className="bg-stone-900/5 rounded-lg text-black/70" style={{ padding: 2 }}>
@@ -1357,6 +1501,44 @@ export default function App() {
         <div className="text-xs text-black/30">© Laurids Kern {new Date().getFullYear()}</div>
       </div>
     </main>
+  );
+}
+
+function ZoomPointPad({ x, y, onChange }: { x: number; y: number; onChange: (x: number, y: number) => void }) {
+  const padRef = useRef<HTMLDivElement | null>(null);
+
+  const updateFromPoint = useCallback((clientX: number, clientY: number) => {
+    const rect = padRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0 || rect.height === 0) return;
+    const nextX = Math.min(Math.max(((clientX - rect.left) / rect.width) * 100, 0), 100);
+    const nextY = Math.min(Math.max(((clientY - rect.top) / rect.height) * 100, 0), 100);
+    onChange(Math.round(nextX), Math.round(nextY));
+  }, [onChange]);
+
+  return (
+    <div
+      ref={padRef}
+      className="relative aspect-square w-full rounded-md bg-stone-900/5 cursor-crosshair select-none"
+      onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPoint(event.clientX, event.clientY);
+      }}
+      onPointerMove={(event: ReactPointerEvent<HTMLDivElement>) => {
+        if (event.buttons !== 1) return;
+        updateFromPoint(event.clientX, event.clientY);
+      }}
+    >
+      <div className="pointer-events-none absolute inset-0 grid grid-cols-2 grid-rows-2">
+        <div className="border-r border-b border-black/10" />
+        <div className="border-b border-black/10" />
+        <div className="border-r border-black/10" />
+        <div />
+      </div>
+      <div
+        className="absolute h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-blue-500 shadow ring-2 ring-white"
+        style={{ left: `${x}%`, top: `${y}%` }}
+      />
+    </div>
   );
 }
 

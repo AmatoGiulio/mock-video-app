@@ -13,6 +13,7 @@ import {
   VideoSample,
 } from 'mediabunny';
 import { Mockup } from '../constants/mockups';
+import { getZoomScale, scaleRectAroundPoint, type ZoomEffect } from '../zoomEffect';
 
 export type Background =
   | { type: 'color'; color: string }
@@ -37,11 +38,12 @@ type GenerateVideoParams = {
   videoStartTimes: number[];
   videoEndTimes: number[];
   deviceGapPercent: number;
+  zoomEffect: ZoomEffect;
 };
 
 type GenerateImageParams = Omit<
   GenerateVideoParams,
-  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes'
+  'videoFiles' | 'frameRate' | 'exportFormat' | 'loopShorter' | 'videoStartTimes' | 'videoEndTimes' | 'zoomEffect'
 > & {
   imageFiles: File[];
 };
@@ -240,6 +242,7 @@ const useMediabunny = (): UseMediabunnyHook => {
     videoStartTimes,
     videoEndTimes,
     deviceGapPercent,
+    zoomEffect,
   }: GenerateVideoParams): Promise<void> => {
     setTranspilingStarted(true);
     setTranspilingFinished(false);
@@ -345,13 +348,13 @@ const useMediabunny = (): UseMediabunnyHook => {
         ctx.drawImage(mockupImage, slot.posX, slot.posY, mockupWidth, mockupHeight);
       };
 
-      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample) => {
+      const drawVideoFrame = (slot: { posX: number; posY: number }, sample: VideoSample, relativeTime: number) => {
         const videoX = Math.round((slot.posX + offsetX) * 0.9995);
         const videoY = Math.round((slot.posY + offsetY) * 0.9995);
         ctx.save();
         createRoundedRectPath(ctx, videoX, videoY, mockupInnerWidth, mockupInnerHeight, borderRadius);
         ctx.clip();
-        const videoRect = getCoveredVideoRect(
+        let videoRect = getCoveredVideoRect(
           sample.displayWidth,
           sample.displayHeight,
           videoX,
@@ -360,6 +363,12 @@ const useMediabunny = (): UseMediabunnyHook => {
           mockupInnerHeight,
           videoSizePercentage,
         );
+        const zoomScale = getZoomScale(zoomEffect, relativeTime);
+        if (zoomScale !== 1) {
+          const pivotX = videoX + (mockupInnerWidth * zoomEffect.pointX) / 100;
+          const pivotY = videoY + (mockupInnerHeight * zoomEffect.pointY) / 100;
+          videoRect = scaleRectAroundPoint(videoRect, pivotX, pivotY, zoomScale);
+        }
         sample.draw(ctx, videoRect.x, videoRect.y, videoRect.width, videoRect.height);
         ctx.restore();
       };
@@ -383,17 +392,19 @@ const useMediabunny = (): UseMediabunnyHook => {
 
             const t = driverSample.timestamp;
             const samplesByIdx = new Map<number, VideoSample>();
+            const relativeTimesByIdx = new Map<number, number>();
 
             for (const entry of sampleSinks) {
-              let sampleTime: number;
+              let relativeTime: number;
               if (entry.idx !== driverIdx && loopShorter && entry.effectiveDuration > 0) {
-                sampleTime = entry.startTime + (t % entry.effectiveDuration);
+                relativeTime = t % entry.effectiveDuration;
               } else {
-                const frozenRelativeTime = Math.min(t, Math.max(entry.effectiveDuration - frameDuration, 0));
-                sampleTime = entry.startTime + frozenRelativeTime;
+                relativeTime = Math.min(t, Math.max(entry.effectiveDuration - frameDuration, 0));
               }
+              let sampleTime = entry.startTime + relativeTime;
               sampleTime = Math.min(sampleTime, Math.max(entry.endTime - frameDuration, entry.startTime));
               const sample = await entry.sink.getSample(sampleTime);
+              relativeTimesByIdx.set(entry.idx, relativeTime);
               if (sample) {
                 if (entry.lastSample && entry.lastSample !== sample) {
                   entry.lastSample.close();
@@ -408,7 +419,7 @@ const useMediabunny = (): UseMediabunnyHook => {
             for (let i = 0; i < count; i++) {
               drawBackdrop(slots[i]);
               const sample = samplesByIdx.get(i);
-              if (sample) drawVideoFrame(slots[i], sample);
+              if (sample) drawVideoFrame(slots[i], sample, relativeTimesByIdx.get(i) ?? 0);
               drawMockupOverlay(slots[i]);
             }
 
