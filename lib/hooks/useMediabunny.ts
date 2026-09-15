@@ -414,21 +414,28 @@ const useMediabunny = (): UseMediabunnyHook => {
               }
             }
 
-            // Zooms the whole scene (background + every device) together,
-            // around a focus point relative to the full output frame.
-            const { scale: zoomScale, pointX, pointY } = getActiveZoom(zoomKeyframes, t);
-            ctx.save();
-            if (zoomScale !== 1) {
-              const pivotX = (canvasWidth * pointX) / 100;
-              const pivotY = (canvasHeight * pointY) / 100;
+            // Zooms the configured target (whole scene or devices only) around
+            // a focus point, with an optional translation.
+            const zoom = getActiveZoom(zoomKeyframes, t);
+            const applyZoomTransform = () => {
+              if (zoom.scale === 1) return;
+              const pivotX = (canvasWidth * zoom.pointX) / 100;
+              const pivotY = (canvasHeight * zoom.pointY) / 100;
+              ctx.translate((canvasWidth * zoom.offsetX) / 100, (canvasHeight * zoom.offsetY) / 100);
               ctx.translate(pivotX, pivotY);
-              ctx.scale(zoomScale, zoomScale);
+              ctx.scale(zoom.scale, zoom.scale);
               ctx.translate(-pivotX, -pivotY);
-            }
+            };
 
             if (!transparentBackground) {
+              ctx.save();
+              if (zoom.target === "scene") applyZoomTransform();
               paintBackground(ctx, canvasWidth, canvasHeight, background, backgroundImage);
+              ctx.restore();
             }
+
+            ctx.save();
+            if (zoom.target === "scene" || zoom.target === "device") applyZoomTransform();
             for (let i = 0; i < count; i++) {
               drawDeviceSlot(slots[i], samplesByIdx.get(i));
             }

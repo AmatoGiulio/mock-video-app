@@ -17,10 +17,12 @@ export function buildPreviewSurfaceStyle(params: {
 }): CSSProperties {
   const { background, solidColor, isTransparentExport, aspectWidth, aspectHeight } = params;
   const aspect = `${aspectWidth}/${aspectHeight}`;
+  const fittedHeight = "min(52vh, 100%)";
   const base = {
-    height: "100%",
-    width: `calc(60vh * ${aspectWidth}/${aspectHeight})`,
-    maxHeight: "60vh",
+    height: fittedHeight,
+    width: `calc(${fittedHeight} * ${aspectWidth}/${aspectHeight})`,
+    maxHeight: "100%",
+    maxWidth: "100%",
     aspectRatio: aspect,
   } as const;
 

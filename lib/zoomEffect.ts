@@ -1,4 +1,5 @@
 export type ZoomEasing = "easeInOut" | "linear";
+export type ZoomTarget = "scene" | "device";
 
 export type ZoomKeyframe = {
   id: string;
@@ -10,6 +11,9 @@ export type ZoomKeyframe = {
   easeIn: number; // seconds spent ramping from 1x to scale
   easeOut: number; // seconds spent ramping from scale back to 1x
   easing: ZoomEasing;
+  target: ZoomTarget; // which layers the zoom applies to
+  offsetX: number; // -100..100, translation as a percentage of the frame width
+  offsetY: number; // -100..100, translation as a percentage of the frame height
 };
 
 export const MIN_ZOOM_DURATION = 0.2;
@@ -31,6 +35,9 @@ export function createZoomKeyframe(overrides: Partial<Omit<ZoomKeyframe, "id">> 
     easeIn: 0.4,
     easeOut: 0.4,
     easing: "easeInOut",
+    target: "scene",
+    offsetX: 0,
+    offsetY: 0,
     ...overrides,
   };
 }
@@ -62,16 +69,34 @@ function getKeyframeScale(kf: ZoomKeyframe, relativeTime: number): number {
   return kf.scale;
 }
 
+export type ZoomState = {
+  scale: number;
+  pointX: number;
+  pointY: number;
+  target: ZoomTarget;
+  offsetX: number;
+  offsetY: number;
+};
+
+export const IDLE_ZOOM: ZoomState = { scale: 1, pointX: 50, pointY: 50, target: "scene", offsetX: 0, offsetY: 0 };
+
 // Returns the zoom transform that should be applied at `relativeTime` seconds
 // into the clip's own trimmed playback (0 = clip start). Keyframes are
 // expected not to overlap; the first one covering the time wins.
-export function getActiveZoom(keyframes: ZoomKeyframe[], relativeTime: number): { scale: number; pointX: number; pointY: number } {
+export function getActiveZoom(keyframes: ZoomKeyframe[], relativeTime: number): ZoomState {
   for (const kf of keyframes) {
     if (relativeTime > kf.start && relativeTime < kf.end) {
-      return { scale: getKeyframeScale(kf, relativeTime), pointX: kf.pointX, pointY: kf.pointY };
+      return {
+        scale: getKeyframeScale(kf, relativeTime),
+        pointX: kf.pointX,
+        pointY: kf.pointY,
+        target: kf.target ?? "scene",
+        offsetX: kf.offsetX ?? 0,
+        offsetY: kf.offsetY ?? 0,
+      };
     }
   }
-  return { scale: 1, pointX: 50, pointY: 50 };
+  return IDLE_ZOOM;
 }
 
 // --- Timeline editing helpers -------------------------------------------
