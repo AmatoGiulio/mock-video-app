@@ -1448,14 +1448,15 @@ export default function App() {
                           </div>
                           <div
                             className={cn(
-                              "absolute rounded-[5%] overflow-hidden bg-black transition-all duration-200",
+                              "absolute overflow-hidden bg-black transition-all duration-200",
                               !file && "group-hover/phone:opacity-30 group-hover/phone:blur-sm",
                             )}
                             style={{
                               left: `${(getMockupPreviewInnerX(selectedMockup) / selectedMockup.width) * 100}%`,
                               top: `${(getMockupPreviewInnerY(selectedMockup) / selectedMockup.height) * 100}%`,
-                              width: `${(selectedMockup.innerWidth / selectedMockup.width) * 100 * 1.005}%`,
-                              height: `${(selectedMockup.innerHeight / selectedMockup.height) * 100 * 1.01}%`,
+                              width: `${(selectedMockup.innerWidth / selectedMockup.width) * 100}%`,
+                              height: `${(selectedMockup.innerHeight / selectedMockup.height) * 100}%`,
+                              borderRadius: `${(selectedMockup.cornerRadius / selectedMockup.innerWidth) * 100}% / ${(selectedMockup.cornerRadius / selectedMockup.innerHeight) * 100}%`,
                             }}
                           >
                             {file && url && mediaMode === "video" && (

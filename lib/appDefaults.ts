@@ -14,7 +14,7 @@ export function getMockupPreviewInnerX(mockup: Mockup): number {
 }
 
 export function getMockupPreviewInnerY(mockup: Mockup): number {
-  return mockup.innerY ?? (mockup.height - mockup.innerHeight) * 0.4;
+  return mockup.innerY ?? (mockup.height - mockup.innerHeight) / 2;
 }
 
 export function widthFractionForDevices(deviceCount: number, deviceGapPercent: number): number {
